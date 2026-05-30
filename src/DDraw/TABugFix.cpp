@@ -1286,6 +1286,13 @@ int __stdcall GAFGetCurrentFramePtrProc(PInlineX86StackBuffer X)
 // over-clamping at the original 600.
 static const int COMPOSITE_BUF_FALLBACK = 600;
 unsigned int CompositeAABBClampAddr = 0x458B87;
+
+// Minimal guard at the SetSessionDesc call site inside HAPINET_updategameinfo.
+// Hooks 0x004c98fd (the PUSH before the vtable call). EAX already holds
+// &hapi->sessionDesc here, so we simply zero offset +0x34 (lpszPassword).
+// The only dplay-related hook left after full revert of the larger experiments.
+unsigned int NullLpszPasswordInUpdateGameInfoAddr = 0x004c98fd;
+
 int __stdcall CompositeAABBClampProc(PInlineX86StackBuffer X)
 {
 	PROFILE_SCOPE("Hook.CompositeAABBClamp");
@@ -1347,6 +1354,15 @@ int __stdcall CompositeAABBClampProc(PInlineX86StackBuffer X)
 		}
 	}
 
+	return 0;
+}
+
+// Force lpszPassword = NULL in the desc passed to SetSessionDesc.
+// (EAX = &hapi->sessionDesc at the hook point.)
+int __stdcall NullLpszPasswordInUpdateGameInfoProc(PInlineX86StackBuffer X)
+{
+	if (X->Eax)
+		*(uintptr_t*)(X->Eax + 0x34) = 0;   // lpszPassword
 	return 0;
 }
 
@@ -1472,6 +1488,10 @@ TABugFixing::TABugFixing ()
 	m_hooks.push_back(std::make_unique<InlineSingleHook>(CrashFix004cbed5Addr, 5, INLINE_5BYTESLAGGERJMP, CrashFix004cbed5Proc));
 	m_hooks.push_back(std::make_unique<InlineSingleHook>(GAFGetCurrentFramePtrAddr, 5, INLINE_5BYTESLAGGERJMP, GAFGetCurrentFramePtrProc));
 	m_hooks.push_back(std::make_unique<InlineSingleHook>(CompositeAABBClampAddr, 5, INLINE_5BYTESLAGGERJMP, CompositeAABBClampProc));
+
+	// Minimal SetSessionDesc guard (see comment on NullLpszPasswordInUpdateGameInfoAddr).
+	m_hooks.push_back(std::make_unique<InlineSingleHook>(NullLpszPasswordInUpdateGameInfoAddr, 5, INLINE_5BYTESLAGGERJMP, NullLpszPasswordInUpdateGameInfoProc));
+
 	AddVectoredExceptionHandler ( TRUE, VectoredHandler );
 }
 
