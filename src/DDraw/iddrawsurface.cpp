@@ -588,7 +588,13 @@ HRESULT __stdcall IDDrawSurface::Unlock(LPVOID arg1)
 		// not match the demo's ids. Require GameTime running AND at least one
 		// unit with a real footprint (FBI data actually parsed).
 		bool unitsFullyLoaded = false;
-		if (taDump != nullptr && taDump->UNITINFOCount > 0 && taDump->GameTime > 0)
+		// Guard taDump->UnitDef explicitly: during game-end teardown TA frees the
+		// UNITINFO array (nulls UnitDef) while GameTime is still >0 and UNITINFOCount
+		// still holds its old value, so a render frame in that window would deref
+		// NULL+offsetof(FootX) and AV (crashed all players closing game 999190). Also
+		// gate on !s_unitDumpDone so this whole scan stops running once we've dumped.
+		if (!s_unitDumpDone && taDump != nullptr && taDump->UnitDef != nullptr &&
+		    taDump->UNITINFOCount > 0 && taDump->GameTime > 0)
 		{
 			for (unsigned n = 0; n < taDump->UNITINFOCount; ++n)
 				if (taDump->UnitDef[n].FootX != 0) { unitsFullyLoaded = true; break; }
