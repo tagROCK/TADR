@@ -22,6 +22,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <cstring>
 #include <random>
 #include <sstream>
 #include <stdlib.h>
@@ -637,6 +638,32 @@ BYTE CanBuildArrayBufferOverrunFixBytes[] = {
 	0x6a, 0x48, 0x50, 0xe8, 0xe1, 0xa8, 0x0a, 0x00,
 	0x89, 0x86, 0x56, 0x01, 0x00, 0x00, 0xb9, 0x12
 };
+
+// LoadUnitsDownload (0x42dcf0) allocates a build-menu table (one 0xBD-byte block per
+// download/*.tdf) via cmalloc_comt (0x4d83b0 -> cmalloc_MM 0x4d83c0), which does NOT zero in
+// release. Each block's section-count slot is only written if the file parses >=1 section, so
+// an empty/0-section download tdf leaves it holding heap garbage. The loop at 0x42df86 then
+// reads that count and walks (count * 0x25) bytes off the block -> OOB fault. Benign on
+// native Windows (slot happens to read 0), fatal under Wine (large garbage); e.g. TAF-Twilight
+// ships ~307 empty download/*.tdf.
+//
+// Fix: redirect the single cmalloc_comt CALL at 0x42dd74 to a wrapper that allocates then
+// zeroes the block, so every never-written count slot reads 0 (= "no entries", correct).
+// This is a plain 5-byte CALL replacement (the site is already a CALL) -- no instruction
+// relocation / heap trampoline, which is important because TotalA.exe runs under the Windows
+// AppCompat shim stack where the inline-jmp trampoline form proved unstable.
+typedef void* (__cdecl* CmallocComtFn)(const char* name, unsigned int size);
+static BYTE ZeroDownloadMenuCallPatch[5];	// E8 + rel32, filled in the ctor before install
+
+static void* __cdecl ZeroingDownloadMenuAlloc(const char* name, unsigned int size)
+{
+	void* p = ((CmallocComtFn)0x004d83b0)(name, size);	// real cmalloc_comt
+	if (p && size)
+	{
+		memset(p, 0, size);
+	}
+	return p;
+}
 
 // Wine 9.0's kernel32 IsBadReadPtr / IsBadWritePtr only catches
 // EXCEPTION_ACCESS_VIOLATION (0xC0000005); it does NOT catch
@@ -1470,6 +1497,10 @@ TABugFixing::TABugFixing ()
 	HostDoesntLeave.reset(new InlineSingleHook(PutDeadHostInWatchModeAddr, 5, INLINE_5BYTESLAGGERJMP, PutDeadHostInWatchModeProc));
 	JunkYardmapFix.reset(new InlineSingleHook(JunkYardmapFixAddr, 5, INLINE_5BYTESLAGGERJMP, JunkYardmapFixProc));
 	CanBuildArrayBufferOverrunFix.reset(new SingleHook(CanBuildArrayBufferOverrunFixAddr, sizeof(CanBuildArrayBufferOverrunFixBytes), INLINE_UNPROTECTEVINMENT, CanBuildArrayBufferOverrunFixBytes));
+	// Redirect the cmalloc_comt CALL at 0x42dd74 to ZeroingDownloadMenuAlloc (see comment at its definition).
+	ZeroDownloadMenuCallPatch[0] = 0xE8;
+	*(DWORD*)(ZeroDownloadMenuCallPatch + 1) = (DWORD)((BYTE*)&ZeroingDownloadMenuAlloc - (0x42dd74 + 5));
+	m_hooks.push_back(std::make_unique<SingleHook>(0x42dd74u, sizeof(ZeroDownloadMenuCallPatch), INLINE_UNPROTECTEVINMENT, ZeroDownloadMenuCallPatch));
 
 #if WIND_SPEED_SYNC
 	WindSpeedSync.reset(new InlineSingleHook(WindSpeedSyncAddr, 5, INLINE_5BYTESLAGGERJMP, WindSpeedSyncProc));
