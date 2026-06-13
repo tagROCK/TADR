@@ -46,6 +46,9 @@ Zero Alpha5-060322      tazero.ini      zdraw.dll
 
 NEW FEATURES IN BRIEF:
 
+*2026.6.13
+- more detail in crash logs
+
 *2026.6.8
 - bugfix for VoteReject - prevent local user from rejecting himself
 
