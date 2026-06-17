@@ -1697,7 +1697,8 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					int               ndef = (*TAmainStruct_PtrPtr)->NumFeatureDefs;
 					int   baseline = (*TAmainStruct_PtrPtr)->SeaLevel;
 
-					const int   SPOT_COLOR = 254;     // cyan
+					const int   SPOT_COLOR = 254;   // cyan
+					const int BORDER_COLOR = 0;     // black ring for contrast on snow/light maps
 					const float HEIGHT_Z = 0.5f;    // iso-lift in WORLD units per height-unit (map-independent)
 
 					if (fmap != NULL && fdef != NULL && fw > 0 && fh > 0)
@@ -1714,6 +1715,8 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 
 								// is this placed feature a mex? (Metal > 0 == the TDF metal= value)
 								if (fdef[di].Metal <= 0.0f) continue;
+								// mex spots are INDESTRUCTIBLE metal features; reclaim rocks/trees are reclaimable -> skip
+								if (!(fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible)) continue;
 
 								// cell -> world (engine's ×16), then the same scale the unit blips use
 								int worldX = gx * 16 + 8 + 4;   // tweak the "+4" — world-space, scales per map
@@ -1721,6 +1724,15 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right) + 2;
 								int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) + 2;
 
+								// black border (5x5)
+								for (int dyy = -2; dyy <= 2; ++dyy)
+									for (int dxx = -2; dxx <= 2; ++dxx)
+									{
+										int X = px + dxx, Y = py + dyy;
+										if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
+											PixelBits[Y * Aspect.x + X] = (BYTE)BORDER_COLOR;
+									}
+								// cyan fill (3x3) on top
 								for (int dyy = -1; dyy <= 1; ++dyy)
 									for (int dxx = -1; dxx <= 1; ++dxx)
 									{
