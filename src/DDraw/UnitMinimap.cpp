@@ -1679,12 +1679,47 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 				}
 				int NumHotRadarUnits= (*TAmainStruct_PtrPtr)->NumHotRadarUnits;
 				RadarUnit_ * RadarUnits_v= (*TAmainStruct_PtrPtr)->RadarUnits;
-				for (int i= 0; i<NumHotRadarUnits; ++i)
+				for (int i = 0; i < NumHotRadarUnits; ++i)
 				{
-					unitPtr= &Begin[RadarUnits_v[i].ID];
-					if (0!=unitPtr->UnitID)
+					unitPtr = &Begin[RadarUnits_v[i].ID];
+					if (0 != unitPtr->UnitID)
 					{
-						DrawUnit (  PixelBits, &Aspect, unitPtr);
+						DrawUnit(PixelBits, &Aspect, unitPtr);
+					}
+				}
+
+				// --- ProTA: show ALL metal spots on the map (terrain metal grid) ---
+				{
+					int fw = (*TAmainStruct_PtrPtr)->FeatureMapSizeX;
+					int fh = (*TAmainStruct_PtrPtr)->FeatureMapSizeY;
+					FeatureStruct* fmap = (*TAmainStruct_PtrPtr)->FeatureMap;
+					const int SPOT_COLOR = 254;   // 254=cyan
+					const int SPOT_METAL_MIN = 50; // raise to ~50 to show only rich spots
+					const float HEIGHT_SCALE = 0.05f;   // your tuned value
+					if (fmap != NULL && fw > 0 && fh > 0)
+					{
+						for (int gy = 0; gy < fh; ++gy)
+							for (int gx = 0; gx < fw; ++gx)
+								if (fmap[gy * fw + gx].MetalValue >= SPOT_METAL_MIN
+									&& (gx % 1 == 0) && (gy % 1 == 0))      // thin overlapping cells -> one marker per spot
+								{
+									int worldX = (int)(((float)gx + 0.5f) * (float)(*TAmainStruct_PtrPtr)->MapWidth / (float)fw);
+									int worldY = (int)(((float)gy + 0.5f) * (float)(*TAmainStruct_PtrPtr)->MapHeight / (float)fh);
+									int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right - 1);
+									int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) - 4;
+
+									int cellH = fmap[gy * fw + gx].height;
+									int baseline = (*TAmainStruct_PtrPtr)->SeaLevel;          // map's own reference, auto-adapts
+									py = py - (int)((float)(cellH - baseline) * HEIGHT_SCALE);
+
+									for (int dyy = -1; dyy <= 1; ++dyy)   // solid 3x3, single clean marker now
+										for (int dxx = -1; dxx <= 1; ++dxx)
+										{
+											int X = px + dxx, Y = py + dyy;
+											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
+												PixelBits[Y * Aspect.x + X] = (BYTE)SPOT_COLOR;
+										}
+								}
 					}
 				}
 		} while (false);
