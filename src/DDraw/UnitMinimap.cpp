@@ -1688,38 +1688,47 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					}
 				}
 
-				// --- ProTA: show ALL metal spots on the map (terrain metal grid) ---
+				// --- ProTA: show all PLACED MEX FEATURES on the megamap ---
 				{
 					int fw = (*TAmainStruct_PtrPtr)->FeatureMapSizeX;
 					int fh = (*TAmainStruct_PtrPtr)->FeatureMapSizeY;
 					FeatureStruct* fmap = (*TAmainStruct_PtrPtr)->FeatureMap;
-					const int SPOT_COLOR = 254;   // 254=cyan
-					const int SPOT_METAL_MIN = 50; // raise to ~50 to show only rich spots
-					const float HEIGHT_SCALE = 0.05f;   // your tuned value
-					if (fmap != NULL && fw > 0 && fh > 0)
+					FeatureDefStruct* fdef = (*TAmainStruct_PtrPtr)->FeatureDef;
+					int               ndef = (*TAmainStruct_PtrPtr)->NumFeatureDefs;
+					int   baseline = (*TAmainStruct_PtrPtr)->SeaLevel;
+
+					const int   SPOT_COLOR = 254;     // cyan
+					const float HEIGHT_Z = 0.5f;    // iso-lift in WORLD units per height-unit (map-independent)
+
+					if (fmap != NULL && fdef != NULL && fw > 0 && fh > 0)
 					{
 						for (int gy = 0; gy < fh; ++gy)
 							for (int gx = 0; gx < fw; ++gx)
-								if (fmap[gy * fw + gx].MetalValue >= SPOT_METAL_MIN
-									&& (gx % 1 == 0) && (gy % 1 == 0))      // thin overlapping cells -> one marker per spot
-								{
-									int worldX = (int)(((float)gx + 0.5f) * (float)(*TAmainStruct_PtrPtr)->MapWidth / (float)fw);
-									int worldY = (int)(((float)gy + 0.5f) * (float)(*TAmainStruct_PtrPtr)->MapHeight / (float)fh);
-									int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right - 1);
-									int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) - 4;
+							{
+								FeatureStruct* cell = &fmap[gy * fw + gx];
+								unsigned short di = cell->FeatureDefIndex;
 
-									int cellH = fmap[gy * fw + gx].height;
-									int baseline = (*TAmainStruct_PtrPtr)->SeaLevel;          // map's own reference, auto-adapts
-									py = py - (int)((float)(cellH - baseline) * HEIGHT_SCALE);
+								// skip empty cells and 0xfffe "spillover" cells (multi-cell feature bodies)
+								if (di == 0xffff || di == 0xfffe) continue;
+								if (di >= (unsigned short)ndef)   continue;   // safety
 
-									for (int dyy = -1; dyy <= 1; ++dyy)   // solid 3x3, single clean marker now
-										for (int dxx = -1; dxx <= 1; ++dxx)
-										{
-											int X = px + dxx, Y = py + dyy;
-											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
-												PixelBits[Y * Aspect.x + X] = (BYTE)SPOT_COLOR;
-										}
-								}
+								// is this placed feature a mex? (Metal > 0 == the TDF metal= value)
+								if (fdef[di].Metal <= 0.0f) continue;
+
+								// cell -> world (engine's ×16), then the same scale the unit blips use
+								int worldX = gx * 16 + 8 + 4;   // tweak the "+4" — world-space, scales per map
+								int worldY = gy * 16 + 8 - (int)((float)cell->height * HEIGHT_Z) + 4;
+								int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right) + 2;
+								int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) + 2;
+
+								for (int dyy = -1; dyy <= 1; ++dyy)
+									for (int dxx = -1; dxx <= 1; ++dxx)
+									{
+										int X = px + dxx, Y = py + dyy;
+										if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
+											PixelBits[Y * Aspect.x + X] = (BYTE)SPOT_COLOR;
+									}
+							}
 					}
 				}
 		} while (false);
