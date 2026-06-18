@@ -1832,24 +1832,41 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					int               ndef = (*TAmainStruct_PtrPtr)->NumFeatureDefs;
 
 					const int   SPOT_COLOR = 254;
+					const int   OTHER_COLOR = 165;   // uncategorized features (ShowAll); tweak
 					const int   BORDER_COLOR = 0;
 					const int   SPIRE_COLOR = 211;
 					const int   ROCK_COLOR = 100;   // rock dot (tweak; dot-fallback only)
 					const float HEIGHT_Z = 0.5f;
 					const bool  ShowSpires = MyConfig->GetIniBool("MegamapShowSpires", TRUE);
-					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 37);
+					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 30);
 					const int   SpireMax = MyConfig->GetIniInt("MegamapSpireSpriteMax", 64);
 					const bool  ShowRocks = MyConfig->GetIniBool("MegamapShowRocks", TRUE);
+					const bool  ShowAll = MyConfig->GetIniBool("MegamapShowAll", FALSE);
 
 					if (!gMexCacheInit) { MexCacheFlush(); gMexCacheInit = true; }
 					if (gMexCacheMap != (void*)fmap) { MexCacheFlush(); gMexCacheMap = (void*)fmap; }
 
 					const bool  SpriteOn = MyConfig->GetIniBool("MegamapMexSprite", TRUE);
-					const int   SpriteMin = MyConfig->GetIniInt("MegamapMexSpriteMin", 7);
-					const int   SpriteMax = MyConfig->GetIniInt("MegamapMexSpriteMax", 18);
+					const int   SpriteMin = MyConfig->GetIniInt("MegamapMexSpriteMin", 8);
+					const int   SpriteMax = MyConfig->GetIniInt("MegamapMexSpriteMax", 30);
 
 					if (fmap != NULL && fdef != NULL && fw > 0 && fh > 0)
 					{
+						{
+							static int framen = 0;
+							DWORD t0 = GetTickCount();
+							int cells = 0, feats = 0;
+							for (int gy = 0; gy < fh; ++gy)
+								for (int gx = 0; gx < fw; ++gx) {
+									cells++;
+									if (fmap[gy * fw + gx].FeatureDefIndex < (unsigned short)ndef) feats++;
+								}
+							if (framen < 3) {
+								framen++;
+								FILE* pf = fopen("mex_perf_debug.txt", "a");
+								if (pf) { fprintf(pf, "cells=%d feats=%d walk_ms=%lu\n", cells, feats, GetTickCount() - t0); fclose(pf); }
+							}
+						}
 						for (int gy = 0; gy < fh; ++gy)
 							for (int gx = 0; gx < fw; ++gx)
 							{
@@ -1865,28 +1882,51 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								bool isSpire = indestruct && (fdef[di].Metal <= 0.0f) && ShowSpires
 									&& NameEqI(Def_Desc(&fdef[di]), "Spire");
 								bool isRock = reclaim && !indestruct && (fdef[di].Metal > 0.0f) && ShowRocks;
-								if (!isMex && !isSpire && !isRock) continue;
-								int dotColor = isSpire ? SPIRE_COLOR : (isRock ? ROCK_COLOR : SPOT_COLOR);
+								if (!isMex && !isSpire && !isRock && !ShowAll) continue;
+								int dotColor = isSpire ? SPIRE_COLOR
+									: isRock ? ROCK_COLOR
+									: isMex ? SPOT_COLOR
+									: OTHER_COLOR;
 
 								int worldX = gx * 16 + 8 + 4;
 								int worldY = gy * 16 + 8 - (int)((float)cell->height * HEIGHT_Z) + 4;
 								int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right) + 2;
 								int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) + 2;
 
+								{
+									static int n2 = 0;
+									if (n2 < 640) {
+										n2++;
+										int lin = gy * fw + gx;
+										FILE* pf = fopen("mex_lin_debug.txt", "a");
+										if (pf) {
+											fprintf(pf, "%s lin=%d gx=%d gy=%d fw=%d fh=%d totalcells=%d\n",
+												fdef[di].Name, lin, gx, gy, fw, fh, fw * fh);
+											fclose(pf);
+										}
+									}
+								}
+
 								float pxPerCell = 16.0f * (float)Width_m / (float)parent->TAMAPTAPos.right;
 								int   foot = (fdef[di].FootprintX > fdef[di].FootprintZ)
 									? fdef[di].FootprintX : fdef[di].FootprintZ;
-								if (foot < 1) foot = 3;                 // fallback when footprint reads 0
+								if (foot < 1) foot = 3;
 								float natural = pxPerCell * foot;
 
 								int   loClamp = isSpire ? SpireMin : SpriteMin;
 								int   hiClamp = isSpire ? SpireMax : SpriteMax;
 								int   target = (int)(natural + 0.5f);
-								if (target < loClamp) target = loClamp; // floor guarantees a legible size
+								if (target < loClamp) target = loClamp;
 								if (target > hiClamp) target = hiClamp;
 
+								// On maps where each cell is only a pixel or two wide, a sprite
+								// would be illegible AND building hundreds of them in one frame
+								// overruns the megamap's frame budget (only the top rows draw).
+								// Fall back to dots there; sprites stay on normal-sized maps.
+								const float SpriteCellMin = MyConfig->GetIniInt("MegamapSpriteCellMinX10", 40) / 10.0f;
+
 								MexSprite* spr = NULL;
-								if (SpriteOn)                           // gate on the toggle only, not on size
+								if (SpriteOn && pxPerCell >= SpriteCellMin)
 									spr = GetMexSprite(di, &fdef[di], target, fdef, ndef);
 
 								if (spr && spr->bits) {
