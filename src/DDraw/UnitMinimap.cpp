@@ -1629,6 +1629,120 @@ void UnitsMinimap::DrawUnit ( LPBYTE PixelBits, POINT * Aspect, UnitStruct * uni
 	}
 }
 
+// ===================== ProTA mex-sprite cache =====================
+struct MexSprite { LPBYTE bits; int w, h; BYTE trans; int builtPx; };
+static MexSprite gMexCache[1024];
+static void* gMexCacheMap = NULL;
+static bool      gMexCacheInit = false;
+static const char* Def_Desc(FeatureDefStruct* d) { return (const char*)((char*)d + 0x80); }
+
+static void MexCacheFlush()
+{
+	for (int i = 0; i < 1024; ++i) {
+		if (gMexCache[i].bits) { delete[] gMexCache[i].bits; gMexCache[i].bits = NULL; }
+		gMexCache[i].builtPx = 0;
+	}
+}
+
+static int NameEqI(const char* a, const char* b)
+{
+	if (!a || !b) return 0;
+	while (*a && *b) {
+		char ca = *a++, cb = *b++;
+		if (ca >= 'a' && ca <= 'z') ca -= 32;
+		if (cb >= 'a' && cb <= 'z') cb -= 32;
+		if (ca != cb) return 0;
+	}
+	return *a == 0 && *b == 0;
+}
+
+// struct accessors by confirmed raw offset (the header struct mislabels these)
+static const char* Def_Filename(FeatureDefStruct* d) { return (const char*)((char*)d + 0x98); }
+static void* Def_Anims(FeatureDefStruct* d) { return *(void**)((char*)d + 0xA8); }
+static PGAFSequence Def_RSeq(FeatureDefStruct* d) { return *(PGAFSequence*)((char*)d + 0xAC); }
+
+static bool SeqValid(PGAFSequence s)
+{
+	return s && s->Signature == 0x00000001 && s->Frames > 0 && s->Frames <= 256
+		&& s->PtrFrameAry[0].PtrFrame;
+}
+
+// find a parsed GAF already in memory for this filename (via any loaded sibling def)
+static void* FindLoadedGafByFilename(const char* fn, FeatureDefStruct* defs, int ndef)
+{
+	if (!fn || !*fn || !defs) return NULL;
+	for (int i = 0; i < ndef; ++i) {
+		void* a = Def_Anims(&defs[i]);
+		if (!a) continue;
+		if (((unsigned int*)a)[0] != 0x00010100) continue;        // GAF header
+		if (NameEqI(Def_Filename(&defs[i]), fn)) return a;
+	}
+	return NULL;
+}
+
+static PGAFSequence FeatureDefToSequence(FeatureDefStruct* def, FeatureDefStruct* defs, int ndef)
+{
+	if (!def) return NULL;
+
+	// 1) engine already resolved the exact sequence -> use it
+	PGAFSequence r = Def_RSeq(def);
+	if (SeqValid(r)) return r;
+
+	// 2) borrow from a loaded GAF of the same filename
+	void* gaf = FindLoadedGafByFilename(Def_Filename(def), defs, ndef);
+	if (!gaf) return NULL;
+	unsigned int* h = (unsigned int*)gaf;
+	if (h[0] != 0x00010100) return NULL;
+	unsigned n = h[1]; if (n < 1 || n > 4096) return NULL;
+	PGAFSequence* arr = (PGAFSequence*)((char*)gaf + 12);
+	PGAFSequence firstValid = NULL;
+	for (unsigned i = 0; i < n; ++i) {
+		PGAFSequence s = arr[i];
+		if (!SeqValid(s)) continue;
+		if (!firstValid) firstValid = s;
+		if (NameEqI(s->Name, def->Name)) return s;   // best-effort exact match
+	}
+	return firstValid;   // same-family fallback
+}
+
+static MexSprite* GetMexSprite(int defIndex, FeatureDefStruct* def, int targetPx,
+	FeatureDefStruct* defs, int ndef)
+{
+	if (defIndex < 0 || defIndex >= 1024) return NULL;
+	MexSprite* s = &gMexCache[defIndex];
+	if (s->bits && s->builtPx == targetPx) return s;
+	if (s->bits) { delete[] s->bits; s->bits = NULL; }
+
+	PGAFSequence seq = FeatureDefToSequence(def, defs, ndef);
+	if (!seq) return NULL;
+
+	PGAFFrame fr = seq->PtrFrameAry[0].PtrFrame;
+	LPBYTE src = NULL; POINT srcA = { 0,0 };
+	InstanceGAFFrame(fr, &src, &srcA);
+	if (!src || srcA.x <= 0 || srcA.y <= 0) { if (src) free(src); return NULL; }
+
+	int maj = (srcA.x > srcA.y) ? srcA.x : srcA.y;
+	int dw = (int)((float)srcA.x * targetPx / maj + 0.5f);
+	int dh = (int)((float)srcA.y * targetPx / maj + 0.5f);
+	if (dw < 1) dw = 1; if (dh < 1) dh = 1;
+
+	BYTE trans = fr->Background;
+	LPBYTE dst = new BYTE[dw * dh];
+	for (int y = 0; y < dh; ++y) {
+		int sy = y * srcA.y / dh;
+		for (int x = 0; x < dw; ++x) {
+			int sx = x * srcA.x / dw;
+			dst[y * dw + x] = src[sy * srcA.x + sx];
+		}
+	}
+	free(src);
+
+	s->bits = dst; s->w = dw; s->h = dh; s->trans = trans; s->builtPx = targetPx;
+	return s;
+}
+// ================== end ProTA mex-sprite cache ====================
+
+
 void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 {
 	if (TAInGame!=DataShare->TAProgress)
@@ -1695,11 +1809,22 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					FeatureStruct* fmap = (*TAmainStruct_PtrPtr)->FeatureMap;
 					FeatureDefStruct* fdef = (*TAmainStruct_PtrPtr)->FeatureDef;
 					int               ndef = (*TAmainStruct_PtrPtr)->NumFeatureDefs;
-					int   baseline = (*TAmainStruct_PtrPtr)->SeaLevel;
 
-					const int   SPOT_COLOR = 254;   // cyan
-					const int BORDER_COLOR = 0;     // black ring for contrast on snow/light maps
-					const float HEIGHT_Z = 0.5f;    // iso-lift in WORLD units per height-unit (map-independent)
+					const int   SPOT_COLOR = 254;
+					const int   BORDER_COLOR = 0;
+					const int   SPIRE_COLOR = 211;
+					const float HEIGHT_Z = 0.5f;
+					const bool  ShowSpires = MyConfig->GetIniBool("MegamapShowSpires", TRUE);
+					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 37);
+					const int   SpireMax = MyConfig->GetIniInt("MegamapSpireSpriteMax", 64);
+
+					if (!gMexCacheInit) { MexCacheFlush(); gMexCacheInit = true; }
+					if (gMexCacheMap != (void*)fmap) { MexCacheFlush(); gMexCacheMap = (void*)fmap; }
+
+					const bool  SpriteOn = MyConfig->GetIniBool("MegamapMexSprite", TRUE);
+					const int   DotThreshold = MyConfig->GetIniInt("MegamapMexDotThreshold", 4);
+					const int   SpriteMin = MyConfig->GetIniInt("MegamapMexSpriteMin", 7);
+					const int   SpriteMax = MyConfig->GetIniInt("MegamapMexSpriteMax", 18);
 
 					if (fmap != NULL && fdef != NULL && fw > 0 && fh > 0)
 					{
@@ -1709,37 +1834,67 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								FeatureStruct* cell = &fmap[gy * fw + gx];
 								unsigned short di = cell->FeatureDefIndex;
 
-								// skip empty cells and 0xfffe "spillover" cells (multi-cell feature bodies)
 								if (di == 0xffff || di == 0xfffe) continue;
-								if (di >= (unsigned short)ndef)   continue;   // safety
+								if (di >= (unsigned short)ndef)   continue;
 
-								// is this placed feature a mex? (Metal > 0 == the TDF metal= value)
-								if (fdef[di].Metal <= 0.0f) continue;
-								// mex spots are INDESTRUCTIBLE metal features; reclaim rocks/trees are reclaimable -> skip
-								if (!(fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible)) continue;
+								bool indestruct = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible) != 0;
+								bool isMex = indestruct && (fdef[di].Metal > 0.0f);
+								bool isSpire = indestruct && (fdef[di].Metal <= 0.0f) && ShowSpires
+									&& NameEqI(Def_Desc(&fdef[di]), "Spire");
+								if (!isMex && !isSpire) continue;
+								int dotColor = isSpire ? SPIRE_COLOR : SPOT_COLOR;
 
-								// cell -> world (engine's ×16), then the same scale the unit blips use
-								int worldX = gx * 16 + 8 + 4;   // tweak the "+4" — world-space, scales per map
+								int worldX = gx * 16 + 8 + 4;
 								int worldY = gy * 16 + 8 - (int)((float)cell->height * HEIGHT_Z) + 4;
 								int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right) + 2;
 								int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) + 2;
 
-								// black border (5x5)
-								for (int dyy = -2; dyy <= 2; ++dyy)
-									for (int dxx = -2; dxx <= 2; ++dxx)
-									{
-										int X = px + dxx, Y = py + dyy;
-										if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
-											PixelBits[Y * Aspect.x + X] = (BYTE)BORDER_COLOR;
+								float pxPerCell = 16.0f * (float)Width_m / (float)parent->TAMAPTAPos.right;
+								int   foot = (fdef[di].FootprintX > fdef[di].FootprintZ)
+									? fdef[di].FootprintX : fdef[di].FootprintZ;
+								if (foot < 1) foot = 2;
+								float natural = pxPerCell * foot;
+
+								MexSprite* spr = NULL;
+								if (SpriteOn && natural >= (float)DotThreshold) {
+									int loClamp = isSpire ? SpireMin : SpriteMin;
+									int hiClamp = isSpire ? SpireMax : SpriteMax;
+									int target = (int)(natural + 0.5f);
+									if (target < loClamp) target = loClamp;
+									if (target > hiClamp) target = hiClamp;
+									spr = GetMexSprite(di, &fdef[di], target, fdef, ndef);
+								}
+
+								if (spr && spr->bits) {
+									int left = px - spr->w / 2;
+									int top = py - spr->h / 2;
+									for (int yy = 0; yy < spr->h; ++yy) {
+										int Y = top + yy;
+										if (Y < 0 || Y >= Aspect.y) continue;
+										int rowS = yy * spr->w;
+										int rowD = Y * Aspect.x;
+										for (int xx = 0; xx < spr->w; ++xx) {
+											int X = left + xx;
+											if (X < 0 || X >= Aspect.x) continue;
+											BYTE c = spr->bits[rowS + xx];
+											if (c != spr->trans) PixelBits[rowD + X] = c;
+										}
 									}
-								// cyan fill (3x3) on top
-								for (int dyy = -1; dyy <= 1; ++dyy)
-									for (int dxx = -1; dxx <= 1; ++dxx)
-									{
-										int X = px + dxx, Y = py + dyy;
-										if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
-											PixelBits[Y * Aspect.x + X] = (BYTE)SPOT_COLOR;
-									}
+								}
+								else {
+									for (int dyy = -2; dyy <= 2; ++dyy)
+										for (int dxx = -2; dxx <= 2; ++dxx) {
+											int X = px + dxx, Y = py + dyy;
+											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
+												PixelBits[Y * Aspect.x + X] = (BYTE)BORDER_COLOR;
+										}
+									for (int dyy = -1; dyy <= 1; ++dyy)
+										for (int dxx = -1; dxx <= 1; ++dxx) {
+											int X = px + dxx, Y = py + dyy;
+											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
+												PixelBits[Y * Aspect.x + X] = (BYTE)dotColor;
+										}
+								}
 							}
 					}
 				}
