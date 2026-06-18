@@ -1667,15 +1667,36 @@ static bool SeqValid(PGAFSequence s)
 		&& s->PtrFrameAry[0].PtrFrame;
 }
 
-// find a parsed GAF already in memory for this filename (via any loaded sibling def)
-static void* FindLoadedGafByFilename(const char* fn, FeatureDefStruct* defs, int ndef)
+// The real GAF filename for a def. If its own filename is "REUSE", borrow the
+// filename from a def that shares its description (its family) and names a real
+// file -- REUSE features in a TDF share the family's GAF.
+static const char* RealFilename(FeatureDefStruct* def, FeatureDefStruct* defs, int ndef)
 {
-	if (!fn || !*fn || !defs) return NULL;
+	if (!def) return NULL;
+	const char* fn = Def_Filename(def);
+	if (fn && fn[0] && !NameEqI(fn, "REUSE")) return fn;   // has its own file
+	const char* myDesc = Def_Desc(def);
+	if (!myDesc || !myDesc[0]) return NULL;                // nothing to group on
+	for (int i = 0; i < ndef; ++i) {
+		const char* f = Def_Filename(&defs[i]);
+		if (!f || !f[0] || NameEqI(f, "REUSE")) continue;  // need a real filename
+		if (NameEqI(Def_Desc(&defs[i]), myDesc)) return f; // same family
+	}
+	return NULL;
+}
+
+// find a parsed GAF already in memory for this def's (REUSE-resolved) filename
+static void* FindLoadedGafByFilename(FeatureDefStruct* def, FeatureDefStruct* defs, int ndef)
+{
+	if (!def || !defs) return NULL;
+	const char* want = RealFilename(def, defs, ndef);
+	if (!want) return NULL;
 	for (int i = 0; i < ndef; ++i) {
 		void* a = Def_Anims(&defs[i]);
 		if (!a) continue;
-		if (((unsigned int*)a)[0] != 0x00010100) continue;        // GAF header
-		if (NameEqI(Def_Filename(&defs[i]), fn)) return a;
+		if (((unsigned int*)a)[0] != 0x00010100) continue;
+		const char* f = RealFilename(&defs[i], defs, ndef);   // resolve candidate's REUSE too
+		if (f && NameEqI(f, want)) return a;
 	}
 	return NULL;
 }
@@ -1689,7 +1710,7 @@ static PGAFSequence FeatureDefToSequence(FeatureDefStruct* def, FeatureDefStruct
 	if (SeqValid(r)) return r;
 
 	// 2) borrow from a loaded GAF of the same filename
-	void* gaf = FindLoadedGafByFilename(Def_Filename(def), defs, ndef);
+	void* gaf = FindLoadedGafByFilename(def, defs, ndef);
 	if (!gaf) return NULL;
 	unsigned int* h = (unsigned int*)gaf;
 	if (h[0] != 0x00010100) return NULL;
@@ -1714,7 +1735,7 @@ static MexSprite* GetMexSprite(int defIndex, FeatureDefStruct* def, int targetPx
 	if (s->bits) { delete[] s->bits; s->bits = NULL; }
 
 	PGAFSequence seq = FeatureDefToSequence(def, defs, ndef);
-	if (!seq) return NULL;
+	if (!seq) return NULL; 
 
 	PGAFFrame fr = seq->PtrFrameAry[0].PtrFrame;
 	LPBYTE src = NULL; POINT srcA = { 0,0 };
@@ -1813,16 +1834,17 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					const int   SPOT_COLOR = 254;
 					const int   BORDER_COLOR = 0;
 					const int   SPIRE_COLOR = 211;
+					const int   ROCK_COLOR = 100;   // rock dot (tweak; dot-fallback only)
 					const float HEIGHT_Z = 0.5f;
 					const bool  ShowSpires = MyConfig->GetIniBool("MegamapShowSpires", TRUE);
 					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 37);
 					const int   SpireMax = MyConfig->GetIniInt("MegamapSpireSpriteMax", 64);
+					const bool  ShowRocks = MyConfig->GetIniBool("MegamapShowRocks", TRUE);
 
 					if (!gMexCacheInit) { MexCacheFlush(); gMexCacheInit = true; }
 					if (gMexCacheMap != (void*)fmap) { MexCacheFlush(); gMexCacheMap = (void*)fmap; }
 
 					const bool  SpriteOn = MyConfig->GetIniBool("MegamapMexSprite", TRUE);
-					const int   DotThreshold = MyConfig->GetIniInt("MegamapMexDotThreshold", 4);
 					const int   SpriteMin = MyConfig->GetIniInt("MegamapMexSpriteMin", 7);
 					const int   SpriteMax = MyConfig->GetIniInt("MegamapMexSpriteMax", 18);
 
@@ -1838,11 +1860,13 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								if (di >= (unsigned short)ndef)   continue;
 
 								bool indestruct = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible) != 0;
+								bool reclaim = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::reclaimable) != 0;
 								bool isMex = indestruct && (fdef[di].Metal > 0.0f);
 								bool isSpire = indestruct && (fdef[di].Metal <= 0.0f) && ShowSpires
 									&& NameEqI(Def_Desc(&fdef[di]), "Spire");
-								if (!isMex && !isSpire) continue;
-								int dotColor = isSpire ? SPIRE_COLOR : SPOT_COLOR;
+								bool isRock = reclaim && !indestruct && (fdef[di].Metal > 0.0f) && ShowRocks;
+								if (!isMex && !isSpire && !isRock) continue;
+								int dotColor = isSpire ? SPIRE_COLOR : (isRock ? ROCK_COLOR : SPOT_COLOR);
 
 								int worldX = gx * 16 + 8 + 4;
 								int worldY = gy * 16 + 8 - (int)((float)cell->height * HEIGHT_Z) + 4;
@@ -1852,18 +1876,18 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								float pxPerCell = 16.0f * (float)Width_m / (float)parent->TAMAPTAPos.right;
 								int   foot = (fdef[di].FootprintX > fdef[di].FootprintZ)
 									? fdef[di].FootprintX : fdef[di].FootprintZ;
-								if (foot < 1) foot = 2;
+								if (foot < 1) foot = 3;                 // fallback when footprint reads 0
 								float natural = pxPerCell * foot;
 
+								int   loClamp = isSpire ? SpireMin : SpriteMin;
+								int   hiClamp = isSpire ? SpireMax : SpriteMax;
+								int   target = (int)(natural + 0.5f);
+								if (target < loClamp) target = loClamp; // floor guarantees a legible size
+								if (target > hiClamp) target = hiClamp;
+
 								MexSprite* spr = NULL;
-								if (SpriteOn && natural >= (float)DotThreshold) {
-									int loClamp = isSpire ? SpireMin : SpriteMin;
-									int hiClamp = isSpire ? SpireMax : SpriteMax;
-									int target = (int)(natural + 0.5f);
-									if (target < loClamp) target = loClamp;
-									if (target > hiClamp) target = hiClamp;
+								if (SpriteOn)                           // gate on the toggle only, not on size
 									spr = GetMexSprite(di, &fdef[di], target, fdef, ndef);
-								}
 
 								if (spr && spr->bits) {
 									int left = px - spr->w / 2;
