@@ -1838,8 +1838,9 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					const int   ROCK_COLOR = 100;   // rock dot (tweak; dot-fallback only)
 					const float HEIGHT_Z = MyConfig->GetIniInt("MegamapHeightLiftX100", 50) / 100.0f;
 					const bool  ShowSpires = MyConfig->GetIniBool("MegamapShowSpires", TRUE);
-					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 26);
-					const int   SpireMax = MyConfig->GetIniInt("MegamapSpireSpriteMax", 100);
+					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 18);
+					const int   SpireMax = MyConfig->GetIniInt("MegamapSpireSpriteMax", 50);
+					const int   SpireScaleDiv = MyConfig->GetIniInt("MegamapSpireScaleDiv", 40);
 					const bool  ShowRocks = MyConfig->GetIniBool("MegamapShowRocks", TRUE);
 					const bool  ShowAll = MyConfig->GetIniBool("MegamapShowAll", FALSE);
 
@@ -1862,6 +1863,8 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								if (di == 0xffff || di == 0xfffe) continue;
 								if (di >= (unsigned short)ndef)   continue;
 
+								if (cell->occupyingUnitNumber != 0) continue;   // unit built here — skip sprite so the blip shows
+
 								bool indestruct = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible) != 0;
 								bool reclaim = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::reclaimable) != 0;
 								bool autorecl = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::autoreclaimable) != 0;
@@ -1871,7 +1874,25 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								
 								if (!keep && !ShowAll) continue;
 								bool isSpire = indestruct && NameEqI(Def_Desc(&fdef[di]), "Spire");
-								
+								if (isSpire) {
+									static int ns = 0;
+									if (ns < 40) {
+										ns++;
+										FILE* sf = fopen("mex_spire_debug.txt", "a");
+										if (sf) {
+											PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
+											int sw = -1, sh = -1;
+											if (sq && SeqValid(sq)) {
+												PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
+												if (f0) { sw = f0->Width; sh = f0->Height; }
+											}
+											fprintf(sf, "%-14.14s frame=%dx%d foot=%d/%d\n",
+												fdef[di].Name, sw, sh,
+												fdef[di].FootprintX, fdef[di].FootprintZ);
+											fclose(sf);
+										}
+									}
+								}
 								// colour the dot fallback by kind, for readability
 								int dotColor = (fdef[di].Metal > 0.0f) ? SPOT_COLOR        // metal-bearing (mex)
 									: NameEqI(Def_Desc(&fdef[di]), "Spire") ? SPIRE_COLOR  // spire
@@ -1884,16 +1905,33 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) + 2;
 
 								float pxPerCell = 16.0f * (float)Width_m / (float)parent->TAMAPTAPos.right;
-								int   foot = (fdef[di].FootprintX > fdef[di].FootprintZ)
-									? fdef[di].FootprintX : fdef[di].FootprintZ;
-								if (foot < 1) foot = 3;
-								float natural = pxPerCell * foot;
 
-								int   loClamp = isSpire ? SpireMin : SpriteMin;
-								int   hiClamp = isSpire ? SpireMax : SpriteMax;
-								int   target = (int)(natural + 0.5f);
-								if (target < loClamp) target = loClamp;
-								if (target > hiClamp) target = hiClamp;
+								int target;
+								if (isSpire) {
+									// Size spires by their ART HEIGHT (footprint doesn't track
+									// height — a thin tall spire has a small footprint). Resolve
+									// the sprite's source frame and scale its height to the map.
+									int frameH = 0;
+									PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
+									if (sq && SeqValid(sq)) {
+										PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
+										if (f0) frameH = f0->Height;
+									}
+									if (frameH < 1) frameH = 160;          // fallback if art unreadable
+									// scale: art-height px -> megamap px. SpireScaleDiv tunes it.
+									target = (int)(frameH * pxPerCell / (float)SpireScaleDiv + 0.5f);
+									if (target < SpireMin) target = SpireMin;
+									if (target > SpireMax) target = SpireMax;
+								}
+								else {
+									int foot = (fdef[di].FootprintX > fdef[di].FootprintZ)
+										? fdef[di].FootprintX : fdef[di].FootprintZ;
+									if (foot < 1) foot = 3;
+									float natural = pxPerCell * foot;
+									target = (int)(natural + 0.5f);
+									if (target < SpriteMin) target = SpriteMin;
+									if (target > SpriteMax) target = SpriteMax;
+								}
 
 								// On maps where each cell is only a pixel or two wide, a sprite
 								// would be illegible AND building hundreds of them in one frame
@@ -1907,7 +1945,8 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 
 								if (spr && spr->bits) {
 									int left = px - spr->w / 2;
-									int top = py - spr->h / 2;
+									int top = isSpire ? (py - spr->h + spr->h / 6 + 6)   // spires: anchor near base
+										: (py - spr->h / 2);            // others: centered
 									for (int yy = 0; yy < spr->h; ++yy) {
 										int Y = top + yy;
 										if (Y < 0 || Y >= Aspect.y) continue;
@@ -1922,15 +1961,16 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 									}
 								}
 								else {
+									int dotY = py;   // match the +3 mex/feature sprite nudge
 									for (int dyy = -2; dyy <= 2; ++dyy)
 										for (int dxx = -2; dxx <= 2; ++dxx) {
-											int X = px + dxx, Y = py + dyy;
+											int X = px + dxx, Y = dotY + dyy;
 											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
 												PixelBits[Y * Aspect.x + X] = (BYTE)BORDER_COLOR;
 										}
 									for (int dyy = -1; dyy <= 1; ++dyy)
 										for (int dxx = -1; dxx <= 1; ++dxx) {
-											int X = px + dxx, Y = py + dyy;
+											int X = px + dxx, Y = dotY + dyy;
 											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
 												PixelBits[Y * Aspect.x + X] = (BYTE)dotColor;
 										}
