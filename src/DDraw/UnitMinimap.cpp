@@ -1836,10 +1836,10 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					const int   BORDER_COLOR = 0;
 					const int   SPIRE_COLOR = 211;
 					const int   ROCK_COLOR = 100;   // rock dot (tweak; dot-fallback only)
-					const float HEIGHT_Z = 0.5f;
+					const float HEIGHT_Z = MyConfig->GetIniInt("MegamapHeightLiftX100", 50) / 100.0f;
 					const bool  ShowSpires = MyConfig->GetIniBool("MegamapShowSpires", TRUE);
-					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 30);
-					const int   SpireMax = MyConfig->GetIniInt("MegamapSpireSpriteMax", 64);
+					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 26);
+					const int   SpireMax = MyConfig->GetIniInt("MegamapSpireSpriteMax", 100);
 					const bool  ShowRocks = MyConfig->GetIniBool("MegamapShowRocks", TRUE);
 					const bool  ShowAll = MyConfig->GetIniBool("MegamapShowAll", FALSE);
 
@@ -1852,21 +1852,7 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 
 					if (fmap != NULL && fdef != NULL && fw > 0 && fh > 0)
 					{
-						{
-							static int framen = 0;
-							DWORD t0 = GetTickCount();
-							int cells = 0, feats = 0;
-							for (int gy = 0; gy < fh; ++gy)
-								for (int gx = 0; gx < fw; ++gx) {
-									cells++;
-									if (fmap[gy * fw + gx].FeatureDefIndex < (unsigned short)ndef) feats++;
-								}
-							if (framen < 3) {
-								framen++;
-								FILE* pf = fopen("mex_perf_debug.txt", "a");
-								if (pf) { fprintf(pf, "cells=%d feats=%d walk_ms=%lu\n", cells, feats, GetTickCount() - t0); fclose(pf); }
-							}
-						}
+						
 						for (int gy = 0; gy < fh; ++gy)
 							for (int gx = 0; gx < fw; ++gx)
 							{
@@ -1878,34 +1864,24 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 
 								bool indestruct = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible) != 0;
 								bool reclaim = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::reclaimable) != 0;
-								bool isMex = indestruct && (fdef[di].Metal > 0.0f);
-								bool isSpire = indestruct && (fdef[di].Metal <= 0.0f) && ShowSpires
-									&& NameEqI(Def_Desc(&fdef[di]), "Spire");
-								bool isRock = reclaim && !indestruct && (fdef[di].Metal > 0.0f) && ShowRocks;
-								if (!isMex && !isSpire && !isRock && !ShowAll) continue;
-								int dotColor = isSpire ? SPIRE_COLOR
-									: isRock ? ROCK_COLOR
-									: isMex ? SPOT_COLOR
-									: OTHER_COLOR;
+								bool autorecl = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::autoreclaimable) != 0;
+								// landmark = indestructible AND not reclaimable. Wrecks are
+								// indestructible but reclaimable, so this excludes them.
+								bool keep = indestruct && !reclaim;
+								
+								if (!keep && !ShowAll) continue;
+								bool isSpire = indestruct && NameEqI(Def_Desc(&fdef[di]), "Spire");
+								
+								// colour the dot fallback by kind, for readability
+								int dotColor = (fdef[di].Metal > 0.0f) ? SPOT_COLOR        // metal-bearing (mex)
+									: NameEqI(Def_Desc(&fdef[di]), "Spire") ? SPIRE_COLOR  // spire
+									: indestruct ? OTHER_COLOR                              // other indestructible (walls etc.)
+									: OTHER_COLOR;                                          // ShowAll catch-all
 
 								int worldX = gx * 16 + 8 + 4;
 								int worldY = gy * 16 + 8 - (int)((float)cell->height * HEIGHT_Z) + 4;
 								int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right) + 2;
 								int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) + 2;
-
-								{
-									static int n2 = 0;
-									if (n2 < 640) {
-										n2++;
-										int lin = gy * fw + gx;
-										FILE* pf = fopen("mex_lin_debug.txt", "a");
-										if (pf) {
-											fprintf(pf, "%s lin=%d gx=%d gy=%d fw=%d fh=%d totalcells=%d\n",
-												fdef[di].Name, lin, gx, gy, fw, fh, fw * fh);
-											fclose(pf);
-										}
-									}
-								}
 
 								float pxPerCell = 16.0f * (float)Width_m / (float)parent->TAMAPTAPos.right;
 								int   foot = (fdef[di].FootprintX > fdef[di].FootprintZ)
