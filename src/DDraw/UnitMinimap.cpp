@@ -1812,16 +1812,7 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 				{
 					break;
 				}
-				int NumHotRadarUnits= (*TAmainStruct_PtrPtr)->NumHotRadarUnits;
-				RadarUnit_ * RadarUnits_v= (*TAmainStruct_PtrPtr)->RadarUnits;
-				for (int i = 0; i < NumHotRadarUnits; ++i)
-				{
-					unitPtr = &Begin[RadarUnits_v[i].ID];
-					if (0 != unitPtr->UnitID)
-					{
-						DrawUnit(PixelBits, &Aspect, unitPtr);
-					}
-				}
+				
 
 				// --- ProTA: show all PLACED MEX FEATURES on the megamap ---
 				{
@@ -1862,8 +1853,6 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 
 								if (di == 0xffff || di == 0xfffe) continue;
 								if (di >= (unsigned short)ndef)   continue;
-
-								if (cell->occupyingUnitNumber != 0) continue;   // unit built here — skip sprite so the blip shows
 
 								bool indestruct = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible) != 0;
 								bool reclaim = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::reclaimable) != 0;
@@ -1958,6 +1947,16 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 										}
 								}
 							}
+					}
+					int NumHotRadarUnits = (*TAmainStruct_PtrPtr)->NumHotRadarUnits;
+					RadarUnit_* RadarUnits_v = (*TAmainStruct_PtrPtr)->RadarUnits;
+					for (int i = 0; i < NumHotRadarUnits; ++i)
+					{
+						unitPtr = &Begin[RadarUnits_v[i].ID];
+						if (0 != unitPtr->UnitID)
+						{
+							DrawUnit(PixelBits, &Aspect, unitPtr);
+						}
 					}
 				}
 		} while (false);
