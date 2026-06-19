@@ -1822,6 +1822,17 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					FeatureDefStruct* fdef = (*TAmainStruct_PtrPtr)->FeatureDef;
 					int               ndef = (*TAmainStruct_PtrPtr)->NumFeatureDefs;
 
+					// --- fog-of-war shading (mirror MappedMAP terrain fog) ---
+					const int    fogSightID = (int)(*TAmainStruct_PtrPtr)->LOS_Sight_PlayerID;
+					PlayerStruct* fogPlayer = &((*TAmainStruct_PtrPtr)->Players[fogSightID]);
+					const int     fogLosW = fogPlayer->LOS_Tilewidth;
+					const int     fogLosH = fogPlayer->LOS_Tileheight;
+					LPBYTE        fogSeenNow = fogPlayer->LOS_MEMORY_p;              // currently visible (byte)
+					LPWORD        fogEverSeen = (*TAmainStruct_PtrPtr)->MAPPED_MEMORY_p; // ever seen (word bitmask)
+					LPBYTE        fogGray = (*TAmainStruct_PtrPtr)->TAProgramStruct_Ptr->GRAY_TABLE;
+					const bool    fogOn = (fogSeenNow != NULL && fogEverSeen != NULL && fogGray != NULL
+						&& fogLosW > 0 && fogLosH > 0);
+
 					const int   SPOT_COLOR = 254;
 					const int   OTHER_COLOR = 165;   // uncategorized features (ShowAll); tweak
 					const int   BORDER_COLOR = 0;
@@ -1875,6 +1886,24 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right) + 2;
 								int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) + 2;
 
+								// fog state at this feature: 0=visible (full colour),
+								// 1=explored-but-fogged (gray), 2=never seen (skip)
+								int fogState = 0;
+								if (fogOn) {
+									int losX = worldX / 32;
+									int losY = worldY / 32;
+									if (losX < 0 || losY < 0 || losX >= fogLosW || losY >= fogLosH) {
+										fogState = 2;   // off-map / unknown ? treat as unseen
+									}
+									else {
+										int li = losY * fogLosW + losX;
+										bool everSeen = (fogEverSeen[li] & (1 << fogSightID)) != 0;
+										bool seenNow = (fogSeenNow[li] != 0);
+										fogState = !everSeen ? 2 : (seenNow ? 0 : 1);
+									}
+								}
+								if (fogState == 2) continue;   // never seen — draw nothing (like terrain)
+
 								float pxPerCell = 16.0f * (float)Width_m / (float)parent->TAMAPTAPos.right;
 
 								int target;
@@ -1927,7 +1956,8 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 											int X = left + xx;
 											if (X < 0 || X >= Aspect.x) continue;
 											BYTE c = spr->bits[rowS + xx];
-											if (c != spr->trans) PixelBits[rowD + X] = c;
+											if (c != spr->trans)
+												PixelBits[rowD + X] = (fogState == 1) ? fogGray[c] : c;
 										}
 									}
 								}
@@ -1943,7 +1973,7 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 										for (int dxx = -1; dxx <= 1; ++dxx) {
 											int X = px + dxx, Y = dotY + dyy;
 											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
-												PixelBits[Y * Aspect.x + X] = (BYTE)dotColor;
+												PixelBits[Y * Aspect.x + X] = (BYTE)(fogState == 1 ? fogGray[dotColor] : dotColor);
 										}
 								}
 							}
