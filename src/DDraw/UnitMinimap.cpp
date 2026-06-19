@@ -1836,20 +1836,20 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 					const int   BORDER_COLOR = 0;
 					const int   SPIRE_COLOR = 211;
 					const int   ROCK_COLOR = 100;   // rock dot (tweak; dot-fallback only)
-					const float HEIGHT_Z = MyConfig->GetIniInt("MegamapHeightLiftX100", 50) / 100.0f;
-					const bool  ShowSpires = MyConfig->GetIniBool("MegamapShowSpires", TRUE);
-					const int   SpireMin = MyConfig->GetIniInt("MegamapSpireSpriteMin", 18);
-					const int   SpireMax = MyConfig->GetIniInt("MegamapSpireSpriteMax", 50);
-					const int   SpireScaleDiv = MyConfig->GetIniInt("MegamapSpireScaleDiv", 40);
-					const bool  ShowRocks = MyConfig->GetIniBool("MegamapShowRocks", TRUE);
-					const bool  ShowAll = MyConfig->GetIniBool("MegamapShowAll", FALSE);
+					const float HEIGHT_Z = 0.5f;
+					const bool  ShowSpires = true;
+					const int   SpireMin = 18;
+					const int   SpireMax = 50;
+					const int   SpireScaleDiv = 15;
+					const bool  ShowRocks = true;
+					const bool  ShowAll = false;
 
 					if (!gMexCacheInit) { MexCacheFlush(); gMexCacheInit = true; }
 					if (gMexCacheMap != (void*)fmap) { MexCacheFlush(); gMexCacheMap = (void*)fmap; }
 
-					const bool  SpriteOn = MyConfig->GetIniBool("MegamapMexSprite", TRUE);
-					const int   SpriteMin = MyConfig->GetIniInt("MegamapMexSpriteMin", 8);
-					const int   SpriteMax = MyConfig->GetIniInt("MegamapMexSpriteMax", 30);
+					const bool  SpriteOn = true;
+					const int SpriteMin = 8;
+					const int   SpriteMax = 30;
 
 					if (fmap != NULL && fdef != NULL && fw > 0 && fh > 0)
 					{
@@ -1874,25 +1874,7 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								
 								if (!keep && !ShowAll) continue;
 								bool isSpire = indestruct && NameEqI(Def_Desc(&fdef[di]), "Spire");
-								if (isSpire) {
-									static int ns = 0;
-									if (ns < 40) {
-										ns++;
-										FILE* sf = fopen("mex_spire_debug.txt", "a");
-										if (sf) {
-											PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
-											int sw = -1, sh = -1;
-											if (sq && SeqValid(sq)) {
-												PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
-												if (f0) { sw = f0->Width; sh = f0->Height; }
-											}
-											fprintf(sf, "%-14.14s frame=%dx%d foot=%d/%d\n",
-												fdef[di].Name, sw, sh,
-												fdef[di].FootprintX, fdef[di].FootprintZ);
-											fclose(sf);
-										}
-									}
-								}
+								
 								// colour the dot fallback by kind, for readability
 								int dotColor = (fdef[di].Metal > 0.0f) ? SPOT_COLOR        // metal-bearing (mex)
 									: NameEqI(Def_Desc(&fdef[di]), "Spire") ? SPIRE_COLOR  // spire
@@ -1937,10 +1919,10 @@ void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
 								// would be illegible AND building hundreds of them in one frame
 								// overruns the megamap's frame budget (only the top rows draw).
 								// Fall back to dots there; sprites stay on normal-sized maps.
-								const float SpriteCellMin = MyConfig->GetIniInt("MegamapSpriteCellMinX10", 40) / 10.0f;
+								
 
 								MexSprite* spr = NULL;
-								if (SpriteOn && pxPerCell >= SpriteCellMin)
+								if (SpriteOn)
 									spr = GetMexSprite(di, &fdef[di], target, fdef, ndef);
 
 								if (spr && spr->bits) {
