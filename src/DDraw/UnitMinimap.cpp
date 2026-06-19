@@ -24,6 +24,10 @@ using namespace std;
 #include "TAConfig.h"
 #include "ExternQuickKey.h"
 
+// ProTA: flat downward nudge (px) for megamap mex sprites AND unit blips,
+// so both sit a little lower on the terrain. Keep both uses on this one
+// constant so the sprite and its blip stay aligned.
+static const int MEGAMAP_BLIP_YNUDGE = 6;
 
 #if USEMEGAMAP
 
@@ -1384,7 +1388,9 @@ void UnitsMinimap::DrawUnit ( LPBYTE PixelBits, POINT * Aspect, UnitStruct * uni
 	UnitPicture( unitPtr, PlayerID, &GafPixelBits, &GafAspect);
 	DescRect.left= static_cast<int>(static_cast<float>(TAx)* (static_cast<float>(Width_m)/ static_cast<float>(parent->TAMAPTAPos.right)))- GafAspect.x/ 2;
 	DescRect.right= DescRect.left+ GafAspect.x;
-	DescRect.top= static_cast<int>(static_cast<float>(TAy)* (static_cast<float>(Height_m)/ static_cast<float>(parent->TAMAPTAPos.bottom)))- GafAspect.y/ 2;
+	
+	DescRect.top = static_cast<int>(static_cast<float>(TAy) * (static_cast<float>(Height_m) / static_cast<float>(parent->TAMAPTAPos.bottom))) - GafAspect.y / 2 + MEGAMAP_BLIP_YNUDGE;
+	DescRect.bottom = DescRect.top + GafAspect.y;
 	DescRect.bottom= DescRect.top+ GafAspect.y;
 
 	Aspect->x= (Aspect->x)/ 4* 4;// avoid draw out of the surface, this x== pitch
@@ -1630,6 +1636,7 @@ void UnitsMinimap::DrawUnit ( LPBYTE PixelBits, POINT * Aspect, UnitStruct * uni
 }
 
 // ===================== ProTA mex-sprite cache =====================
+
 struct MexSprite { LPBYTE bits; int w, h; BYTE trans; int builtPx; };
 static MexSprite gMexCache[1024];
 static void* gMexCacheMap = NULL;
@@ -1761,243 +1768,222 @@ static MexSprite* GetMexSprite(int defIndex, FeatureDefStruct* def, int targetPx
 	s->bits = dst; s->w = dw; s->h = dh; s->trans = trans; s->builtPx = targetPx;
 	return s;
 }
+
+// ===================================================================
+// ProTA: draw placed indestructible features into the megamap TERRAIN
+// image (MappedBits), so they get fogged/greyed by the existing terrain
+// fog pass and layer correctly under the unit blips.
+//
+// Called from MappedMap::NowDrawMapped, AFTER the terrain is copied in
+// and BEFORE the LOS/fog passes run. Runs once per sim-tick (tick-cached
+// there), not per render frame.
+//
+// STAGE 1: flat dots only (no sprites yet) to prove the integration:
+// correct buffer, coordinate space, and that the fog pass greys them.
+//
+//   bits          - the MappedBits terrain buffer (Width*Height, 8-bit)
+//   Width, Height - dimensions of that buffer (== megamap image size)
+//
+// World extent is derived internally from the feature grid (16 world
+// units per cell), so this needs no TAMAPTAPos / parent pointer.
+// ===================================================================
+void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
+{
+	if (!bits || Width <= 0 || Height <= 0)
+		return;
+
+	int fw = (*TAmainStruct_PtrPtr)->FeatureMapSizeX;
+	int fh = (*TAmainStruct_PtrPtr)->FeatureMapSizeY;
+	FeatureStruct* fmap = (*TAmainStruct_PtrPtr)->FeatureMap;
+	FeatureDefStruct* fdef = (*TAmainStruct_PtrPtr)->FeatureDef;
+	int               ndef = (*TAmainStruct_PtrPtr)->NumFeatureDefs;
+	if (fmap == NULL || fdef == NULL || fw <= 0 || fh <= 0)
+		return;
+	if (!gMexCacheInit) { MexCacheFlush(); gMexCacheInit = true; }
+	if (gMexCacheMap != (void*)fmap) { MexCacheFlush(); gMexCacheMap = (void*)fmap; }
+	// world extent  match the OLD overlay's formula exactly so baked
+	// sprites land where the previous overlay drew them:
+	// TAMAPTAPos.right = (TNT Width-1)*16, .bottom = (TNT Height-4)*16.
+	int mapRight = (fw - 1) * 16;
+	int mapBottom = (fh - 4) * 16;
+	if (mapRight <= 0)  mapRight = fw * 16;   // guard tiny maps
+	if (mapBottom <= 0) mapBottom = fh * 16;
+
+	const int   SPOT_COLOR = 254;  // mex dot (fallback only)
+	const int   SPIRE_COLOR = 211;  // spire dot (fallback only)
+	const int   OTHER_COLOR = 165;  // other indestructible (fallback only)
+	const float HEIGHT_Z = 0.5f; // iso-lift (same as the overlay used)
+	const int   SpireMin = 18;
+	const int   SpireMax = 50;
+	const int   SpireScaleDiv = 15;
+	const int   SpriteMin = 8;
+	const int   SpriteMax = 30;
+	const int   FeatureScaleDiv = 12;   // non-spire art-size divisor; SMALLER = bigger walls/mexes
+
+	for (int gy = 0; gy < fh; ++gy)
+		for (int gx = 0; gx < fw; ++gx)
+		{
+			FeatureStruct* cell = &fmap[gy * fw + gx];
+			unsigned short di = cell->FeatureDefIndex;
+			if (di == 0xffff || di == 0xfffe) continue;
+			if (di >= (unsigned short)ndef)   continue;
+
+			// keep: indestructible AND not reclaimable
+			bool indestruct = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible) != 0;
+			bool reclaim = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::reclaimable) != 0;
+			if (!(indestruct && !reclaim)) continue;
+
+			bool isSpire = indestruct && NameEqI(Def_Desc(&fdef[di]), "Spire");
+
+			int dotColor = (fdef[di].Metal > 0.0f) ? SPOT_COLOR
+				: isSpire ? SPIRE_COLOR
+				: OTHER_COLOR;
+
+			// cell -> world -> image pixel (same formula as the old overlay)
+			int worldX = gx * 16 + 8 + 4;
+			int worldY = gy * 16 + 8 - (int)((float)cell->height * HEIGHT_Z) + 4;
+			int px = (int)((float)worldX * (float)Width / (float)mapRight) + 2;
+			int py = (int)((float)worldY * (float)Height / (float)mapBottom) + 2 + MEGAMAP_BLIP_YNUDGE;
+
+			// pxPerCell uses the SAME Width/mapRight ratio as the old overlay
+			float pxPerCell = 16.0f * (float)Width / (float)mapRight;
+
+			int target;
+			if (isSpire) {
+				int frameH = 0;
+				PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
+				if (sq && SeqValid(sq)) {
+					PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
+					if (f0) frameH = f0->Height;
+				}
+				if (frameH < 1) frameH = 160;
+				target = (int)(frameH * pxPerCell / (float)SpireScaleDiv + 0.5f);
+				if (target < SpireMin) target = SpireMin;
+				if (target > SpireMax) target = SpireMax;
+			}
+			else {
+				// Size by ART dimensions, not footprint  footprint doesn't
+				// track visual size (e.g. DryRuin06 foot 3 but art 149px;
+				// DryRuin19 foot 5 but art 30px). Use the major art dimension,
+				// scaled like spires.
+				int artMaj = 0;
+				PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
+				if (sq && SeqValid(sq)) {
+					PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
+					if (f0) artMaj = (f0->Width > f0->Height) ? f0->Width : f0->Height;
+				}
+				if (artMaj < 1) artMaj = 80;   // fallback if art unreadable
+				target = (int)(artMaj * pxPerCell / (float)FeatureScaleDiv + 0.5f);
+				if (target < SpriteMin) target = SpriteMin;
+				if (target > SpriteMax) target = SpriteMax;
+			}
+
+			MexSprite* spr = GetMexSprite(di, &fdef[di], target, fdef, ndef);
+
+			if (spr && spr->bits) {
+				int left = px - spr->w / 2;
+				int top = isSpire ? (py - spr->h + spr->h / 6 + 6)
+					: (py - spr->h / 2);
+				for (int yy = 0; yy < spr->h; ++yy) {
+					int Y = top + yy;
+					if (Y < 0 || Y >= Height) continue;
+					int rowS = yy * spr->w;
+					int rowD = Y * Width;
+					for (int xx = 0; xx < spr->w; ++xx) {
+						int X = left + xx;
+						if (X < 0 || X >= Width) continue;
+						BYTE c = spr->bits[rowS + xx];
+						if (c != spr->trans) bits[rowD + X] = c;   // NO fog code  the fog pass greys it
+					}
+				}
+			}
+			else {
+				// fallback dot (rarely hit art unresolvable)
+				for (int dyy = -1; dyy <= 1; ++dyy)
+					for (int dxx = -1; dxx <= 1; ++dxx) {
+						int X = px + dxx, Y = py + dyy;
+						if (X >= 0 && Y >= 0 && X < Width && Y < Height)
+							bits[Y * Width + X] = (BYTE)dotColor;
+					}
+			}
+		}
+}
 // ================== end ProTA mex-sprite cache ====================
 
 
-void UnitsMinimap::NowDrawUnits ( LPBYTE PixelBitsBack, POINT * AspectSrc)
+void UnitsMinimap::NowDrawUnits(LPBYTE PixelBitsBack, POINT* AspectSrc)
 {
-	if (TAInGame!=DataShare->TAProgress)
+	if (TAInGame != DataShare->TAProgress)
 	{
-		return ;
+		return;
 	}
 	//IDDrawSurface::OutptTxt ( "Draw units");
-	POINT Aspect= {0, 0};
-	LPBYTE PixelBits= NULL;
+	POINT Aspect = { 0, 0 };
+	LPBYTE PixelBits = NULL;
 
-	LockOn ( &PixelBits, &Aspect);
-	try 
+	LockOn(&PixelBits, &Aspect);
+	try
 	{
-		do 
+		do
 		{
-			if ((TAInGame!=DataShare->TAProgress))
+			if ((TAInGame != DataShare->TAProgress))
 			{
 				break;
 			}
-			if (NULL==PixelBits)
+			if (NULL == PixelBits)
 			{
 				break;
 			}
+			{
+				// memcpy delegates to vectorised CRT; the hand-rolled
+				// indexed loop was not auto-vectorising.
+				const int rows = AspectSrc->y;
+				const int cols = AspectSrc->x;
+				if (Aspect.x == cols)
 				{
-					// memcpy delegates to vectorised CRT; the hand-rolled
-					// indexed loop was not auto-vectorising.
-					const int rows = AspectSrc->y;
-					const int cols = AspectSrc->x;
-					if (Aspect.x == cols)
+					std::memcpy(PixelBits, PixelBitsBack, static_cast<size_t>(cols) * rows);
+				}
+				else
+				{
+					for (int i = 0; i < rows; ++i)
 					{
-						std::memcpy(PixelBits, PixelBitsBack, static_cast<size_t>(cols) * rows);
-					}
-					else
-					{
-						for (int i = 0; i < rows; ++i)
-						{
-							std::memcpy(PixelBits + Aspect.x * i, PixelBitsBack + cols * i, cols);
-						}
+						std::memcpy(PixelBits + Aspect.x * i, PixelBitsBack + cols * i, cols);
 					}
 				}
+			}
 
-				UnitStruct * Begin= (*TAmainStruct_PtrPtr)->BeginUnitsArray_p ;
-				UnitStruct * unitPtr;
+			UnitStruct* Begin = (*TAmainStruct_PtrPtr)->BeginUnitsArray_p;
+			UnitStruct* unitPtr;
 
-				if (NULL==Begin)
+			if (NULL == Begin)
+			{
+				break;
+			}
+
+			// Feature sprites are now baked into the terrain image in
+			// MappedMap::NowDrawMapped (DrawFeaturesIntoMappedBits), so they
+			// fog/layer for free. Here we only draw the unit blips, which
+			// composite on top of the (already feature-bearing) terrain.
+			int NumHotRadarUnits = (*TAmainStruct_PtrPtr)->NumHotRadarUnits;
+			RadarUnit_* RadarUnits_v = (*TAmainStruct_PtrPtr)->RadarUnits;
+			for (int i = 0; i < NumHotRadarUnits; ++i)
+			{
+				unitPtr = &Begin[RadarUnits_v[i].ID];
+				if (0 != unitPtr->UnitID)
 				{
-					break;
+					DrawUnit(PixelBits, &Aspect, unitPtr);
 				}
-				
+			}
 
-				// --- ProTA: show all PLACED MEX FEATURES on the megamap ---
-				{
-					int fw = (*TAmainStruct_PtrPtr)->FeatureMapSizeX;
-					int fh = (*TAmainStruct_PtrPtr)->FeatureMapSizeY;
-					FeatureStruct* fmap = (*TAmainStruct_PtrPtr)->FeatureMap;
-					FeatureDefStruct* fdef = (*TAmainStruct_PtrPtr)->FeatureDef;
-					int               ndef = (*TAmainStruct_PtrPtr)->NumFeatureDefs;
-
-					// --- fog-of-war shading (mirror MappedMAP terrain fog) ---
-					const int    fogSightID = (int)(*TAmainStruct_PtrPtr)->LOS_Sight_PlayerID;
-					PlayerStruct* fogPlayer = &((*TAmainStruct_PtrPtr)->Players[fogSightID]);
-					const int     fogLosW = fogPlayer->LOS_Tilewidth;
-					const int     fogLosH = fogPlayer->LOS_Tileheight;
-					LPBYTE        fogSeenNow = fogPlayer->LOS_MEMORY_p;              // currently visible (byte)
-					LPWORD        fogEverSeen = (*TAmainStruct_PtrPtr)->MAPPED_MEMORY_p; // ever seen (word bitmask)
-					LPBYTE        fogGray = (*TAmainStruct_PtrPtr)->TAProgramStruct_Ptr->GRAY_TABLE;
-					const bool    fogOn = (fogSeenNow != NULL && fogEverSeen != NULL && fogGray != NULL
-						&& fogLosW > 0 && fogLosH > 0);
-
-					const int   SPOT_COLOR = 254;
-					const int   OTHER_COLOR = 165;   // uncategorized features (ShowAll); tweak
-					const int   BORDER_COLOR = 0;
-					const int   SPIRE_COLOR = 211;
-					const int   ROCK_COLOR = 100;   // rock dot (tweak; dot-fallback only)
-					const float HEIGHT_Z = 0.5f;
-					const bool  ShowSpires = true;
-					const int   SpireMin = 18;
-					const int   SpireMax = 50;
-					const int   SpireScaleDiv = 15;
-					const bool  ShowRocks = true;
-					const bool  ShowAll = false;
-
-					if (!gMexCacheInit) { MexCacheFlush(); gMexCacheInit = true; }
-					if (gMexCacheMap != (void*)fmap) { MexCacheFlush(); gMexCacheMap = (void*)fmap; }
-
-					const bool  SpriteOn = true;
-					const int SpriteMin = 8;
-					const int   SpriteMax = 30;
-
-					if (fmap != NULL && fdef != NULL && fw > 0 && fh > 0)
-					{
-						
-						for (int gy = 0; gy < fh; ++gy)
-							for (int gx = 0; gx < fw; ++gx)
-							{
-								FeatureStruct* cell = &fmap[gy * fw + gx];
-								unsigned short di = cell->FeatureDefIndex;
-
-								if (di == 0xffff || di == 0xfffe) continue;
-								if (di >= (unsigned short)ndef)   continue;
-
-								bool indestruct = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::indestructible) != 0;
-								bool reclaim = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::reclaimable) != 0;
-								bool autorecl = (fdef[di].FeatureMask & (unsigned short)FeatureMasks::autoreclaimable) != 0;
-								// landmark = indestructible AND not reclaimable. Wrecks are
-								// indestructible but reclaimable, so this excludes them.
-								bool keep = indestruct && !reclaim;
-								
-								if (!keep && !ShowAll) continue;
-								bool isSpire = indestruct && NameEqI(Def_Desc(&fdef[di]), "Spire");
-								
-								// colour the dot fallback by kind, for readability
-								int dotColor = (fdef[di].Metal > 0.0f) ? SPOT_COLOR        // metal-bearing (mex)
-									: NameEqI(Def_Desc(&fdef[di]), "Spire") ? SPIRE_COLOR  // spire
-									: indestruct ? OTHER_COLOR                              // other indestructible (walls etc.)
-									: OTHER_COLOR;                                          // ShowAll catch-all
-
-								int worldX = gx * 16 + 8 + 4;
-								int worldY = gy * 16 + 8 - (int)((float)cell->height * HEIGHT_Z) + 4;
-								int px = (int)((float)worldX * (float)Width_m / (float)parent->TAMAPTAPos.right) + 2;
-								int py = (int)((float)worldY * (float)Height_m / (float)parent->TAMAPTAPos.bottom) + 2;
-
-								// fog state at this feature: 0=visible (full colour),
-								// 1=explored-but-fogged (gray), 2=never seen (skip)
-								int fogState = 0;
-								if (fogOn) {
-									int losX = worldX / 32;
-									int losY = worldY / 32;
-									if (losX < 0 || losY < 0 || losX >= fogLosW || losY >= fogLosH) {
-										fogState = 2;   // off-map / unknown ? treat as unseen
-									}
-									else {
-										int li = losY * fogLosW + losX;
-										bool everSeen = (fogEverSeen[li] & (1 << fogSightID)) != 0;
-										bool seenNow = (fogSeenNow[li] != 0);
-										fogState = !everSeen ? 2 : (seenNow ? 0 : 1);
-									}
-								}
-								if (fogState == 2) continue;   // never seen — draw nothing (like terrain)
-
-								float pxPerCell = 16.0f * (float)Width_m / (float)parent->TAMAPTAPos.right;
-
-								int target;
-								if (isSpire) {
-									// Size spires by their ART HEIGHT (footprint doesn't track
-									// height — a thin tall spire has a small footprint). Resolve
-									// the sprite's source frame and scale its height to the map.
-									int frameH = 0;
-									PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
-									if (sq && SeqValid(sq)) {
-										PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
-										if (f0) frameH = f0->Height;
-									}
-									if (frameH < 1) frameH = 160;          // fallback if art unreadable
-									// scale: art-height px -> megamap px. SpireScaleDiv tunes it.
-									target = (int)(frameH * pxPerCell / (float)SpireScaleDiv + 0.5f);
-									if (target < SpireMin) target = SpireMin;
-									if (target > SpireMax) target = SpireMax;
-								}
-								else {
-									int foot = (fdef[di].FootprintX > fdef[di].FootprintZ)
-										? fdef[di].FootprintX : fdef[di].FootprintZ;
-									if (foot < 1) foot = 3;
-									float natural = pxPerCell * foot;
-									target = (int)(natural + 0.5f);
-									if (target < SpriteMin) target = SpriteMin;
-									if (target > SpriteMax) target = SpriteMax;
-								}
-
-								// On maps where each cell is only a pixel or two wide, a sprite
-								// would be illegible AND building hundreds of them in one frame
-								// overruns the megamap's frame budget (only the top rows draw).
-								// Fall back to dots there; sprites stay on normal-sized maps.
-								
-
-								MexSprite* spr = NULL;
-								if (SpriteOn)
-									spr = GetMexSprite(di, &fdef[di], target, fdef, ndef);
-
-								if (spr && spr->bits) {
-									int left = px - spr->w / 2;
-									int top = isSpire ? (py - spr->h + spr->h / 6 + 6)   // spires: anchor near base
-										: (py - spr->h / 2);            // others: centered
-									for (int yy = 0; yy < spr->h; ++yy) {
-										int Y = top + yy;
-										if (Y < 0 || Y >= Aspect.y) continue;
-										int rowS = yy * spr->w;
-										int rowD = Y * Aspect.x;
-										for (int xx = 0; xx < spr->w; ++xx) {
-											int X = left + xx;
-											if (X < 0 || X >= Aspect.x) continue;
-											BYTE c = spr->bits[rowS + xx];
-											if (c != spr->trans)
-												PixelBits[rowD + X] = (fogState == 1) ? fogGray[c] : c;
-										}
-									}
-								}
-								else {
-									int dotY = py;   // match the +3 mex/feature sprite nudge
-									for (int dyy = -2; dyy <= 2; ++dyy)
-										for (int dxx = -2; dxx <= 2; ++dxx) {
-											int X = px + dxx, Y = dotY + dyy;
-											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
-												PixelBits[Y * Aspect.x + X] = (BYTE)BORDER_COLOR;
-										}
-									for (int dyy = -1; dyy <= 1; ++dyy)
-										for (int dxx = -1; dxx <= 1; ++dxx) {
-											int X = px + dxx, Y = dotY + dyy;
-											if (X >= 0 && Y >= 0 && X < Aspect.x && Y < Aspect.y)
-												PixelBits[Y * Aspect.x + X] = (BYTE)(fogState == 1 ? fogGray[dotColor] : dotColor);
-										}
-								}
-							}
-					}
-					int NumHotRadarUnits = (*TAmainStruct_PtrPtr)->NumHotRadarUnits;
-					RadarUnit_* RadarUnits_v = (*TAmainStruct_PtrPtr)->RadarUnits;
-					for (int i = 0; i < NumHotRadarUnits; ++i)
-					{
-						unitPtr = &Begin[RadarUnits_v[i].ID];
-						if (0 != unitPtr->UnitID)
-						{
-							DrawUnit(PixelBits, &Aspect, unitPtr);
-						}
-					}
-				}
 		} while (false);
-		
+
 	}
 	catch (...)
 	{
 		;
 	}
-	
-	Unlock ( PixelBits);
+
+	Unlock(PixelBits);
 }
 
 
