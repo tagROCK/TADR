@@ -1766,80 +1766,36 @@ static MexSprite* GetMexSprite(int defIndex, FeatureDefStruct* def, int targetPx
 	s->bits = dst; s->w = dw; s->h = dh; s->trans = trans; s->builtPx = targetPx;
 	return s;
 }
-// ===== TEMP megamap buffer dump (8-bit BMP) - remove before commit =====
-void __cdecl DumpMegamapBMP(LPBYTE bits, int W, int H)
-{
-	if (!bits || W <= 0 || H <= 0) return;
 
-	// grab the live TA palette (R,G,B,0 per entry) from the program struct
-	BYTE* palBase = NULL;
-	if (TAProgramStruct_PtrPtr && *TAProgramStruct_PtrPtr)
-		palBase = (BYTE*)(*TAProgramStruct_PtrPtr) + 0x214;
-
-	int rowPad = (4 - (W % 4)) % 4;          // BMP rows are 4-byte aligned
-	int imgSize = (W + rowPad) * H;
-	int palSize = 256 * 4;
-	int offBits = 54 + palSize;
-	int fileSize = offBits + imgSize;
-
-	FILE* f = fopen("megamap_dump.bmp", "wb");
-	if (!f) return;
-
-	// --- BITMAPFILEHEADER (14 bytes) ---
-	unsigned char fh[14] = { 0 };
-	fh[0] = 'B'; fh[1] = 'M';
-	*(int*)&fh[2] = fileSize;
-	*(int*)&fh[10] = offBits;
-	fwrite(fh, 1, 14, f);
-
-	// --- BITMAPINFOHEADER (40 bytes) ---
-	unsigned char ih[40] = { 0 };
-	*(int*)&ih[0] = 40;
-	*(int*)&ih[4] = W;
-	*(int*)&ih[8] = H;                 // positive = bottom-up; we'll write rows bottom-up
-	*(short*)&ih[12] = 1;
-	*(short*)&ih[14] = 8;              // 8 bpp
-	*(int*)&ih[32] = 256;             // colors used
-	fwrite(ih, 1, 40, f);
-
-	// --- palette (BGRA per entry) ---
-	for (int i = 0; i < 256; ++i) {
-		unsigned char bgra[4] = { 0,0,0,0 };
-		if (palBase) {
-			bgra[0] = palBase[i * 4 + 2]; // B
-			bgra[1] = palBase[i * 4 + 1]; // G
-			bgra[2] = palBase[i * 4 + 0]; // R
-		}
-		fwrite(bgra, 1, 4, f);
-	}
-
-	// --- pixels, bottom-up, row-padded ---
-	unsigned char pad[4] = { 0,0,0,0 };
-	for (int y = H - 1; y >= 0; --y) {
-		fwrite(bits + y * W, 1, W, f);
-		if (rowPad) fwrite(pad, 1, rowPad, f);
-	}
-	fclose(f);
-}
-// ===== END dump helper =====
 // ===================================================================
-// ProTA: draw placed indestructible features into the megamap TERRAIN
-// image (MappedBits), so they get fogged/greyed by the existing terrain
-// fog pass and layer correctly under the unit blips.
+// ProTA: draw placed indestructible features (mexes, geos, spires,
+// walls) into the megamap TERRAIN image (MappedBits) as their real GAF
+// sprites, so they inherit the existing terrain fog/grey pass and layer
+// correctly under the unit blips.
 //
 // Called from MappedMap::NowDrawMapped, AFTER the terrain is copied in
 // and BEFORE the LOS/fog passes run. Runs once per sim-tick (tick-cached
 // there), not per render frame.
 //
-// STAGE 1: flat dots only (no sprites yet) to prove the integration:
-// correct buffer, coordinate space, and that the fog pass greys them.
-//
 //   bits          - the MappedBits terrain buffer (Width*Height, 8-bit)
 //   Width, Height - dimensions of that buffer (== megamap image size)
 //
-// World extent is derived internally from the feature grid (16 world
-// units per cell), so this needs no TAMAPTAPos / parent pointer.
+// Positioning matches the +makeposter (true map) view across all map
+// sizes:
+//   - scale: playable extent (fw-2)*16 / (fh-8)*16 (strips the map's
+//     32px-right / 128px-bottom dead-zone), == the true map size.
+//   - centring: each feature centres on its OWN footprint (footX/footZ),
+//     per the Mappy editor's projection. A fixed offset only suits ~1x1
+//     features, which is why a single offset left spires scattered.
+//   - sizing: one ruler for all types (art major dim * Width/mapRight);
+//     no per-type clamps.
+//   - anchor: GAF yPosition handle for vertical placement.
+//
+// Indestructible-and-not-reclaimable features are kept; reclaimable junk
+// (rocks/wrecks/trees) is skipped. Coloured-dot fallback only when a
+// feature's GAF art can't be resolved.
 // ===================================================================
+
 void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 {
 	if (!bits || Width <= 0 || Height <= 0)
@@ -1854,9 +1810,8 @@ void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 		return;
 	if (!gMexCacheInit) { MexCacheFlush(); gMexCacheInit = true; }
 	if (gMexCacheMap != (void*)fmap) { MexCacheFlush(); gMexCacheMap = (void*)fmap; }
-	// world extent  match the OLD overlay's formula exactly so baked
-	// sprites land where the previous overlay drew them:
-	// TAMAPTAPos.right = (TNT Width-1)*16, .bottom = (TNT Height-4)*16.
+	// Playable map extent (strips the 32px-right / 128px-bottom dead-zone):
+	// (fw-2)*16 / (fh-8)*16 == the true map size, matching +makeposter.
 	int mapRight = (fw - 2) * 16;   // true world width  (320 tiles * 16 on a 5120 map)
 	int mapBottom = (fh - 8) * 16;   // true world height
 	if (mapRight <= 0)  mapRight = fw * 16;   // guard tiny maps
@@ -1886,7 +1841,6 @@ void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 				: isSpire ? SPIRE_COLOR
 				: OTHER_COLOR;
 
-			// cell -> world -> image pixel (same formula as the old overlay)
 			// AF centering: each feature centres on its OWN footprint (footX/footZ),
 			// not a fixed offset. footprint at +0x94 (two shorts: X, Z).
 			short* fpXZ = (short*)((char*)&fdef[di] + 0x94);
@@ -1914,7 +1868,7 @@ void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 
 			// One ruler: art pixels -> world -> megamap px, same scale as position.
 			float pxPerWorld = (float)Width / (float)mapRight;
-			const float ARTWORLD = 1.0f;   // art-pixel : world-unit ratio (CALIBRATE)
+			const float ARTWORLD = 1.0f;    // art-pixel : world-unit ratio (sizes vs +makeposter)
 			int target = (int)((float)artMaj * ARTWORLD * pxPerWorld + 0.5f);
 			if (target < 2) target = 2;     // sanity floor only (avoid zero-size)
 
@@ -1922,11 +1876,10 @@ void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 
 			if (spr && spr->bits) {
 				
-				// AF anchor: projected point is the feature CENTRE; the sprite's
-				// anchor is the GAF frame's xPosition/yPosition (in full-res art
-				// pixels), scaled to our downscaled sprite size.
-				int anchorX = spr->w / 2;
-				int anchorY = spr->h;
+				// Anchor: X = geometric centre; Y = GAF yPosition handle (scaled
+				// to the downscaled sprite) so tall art sits on its base.
+				int anchorX = spr->w / 2; // X: geometric centre
+				int anchorY = spr->h;     // Y: base (overridden by GAF handle below)
 				{
 					PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
 					if (sq && SeqValid(sq)) {
@@ -1948,7 +1901,7 @@ void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 						int X = left + xx;
 						if (X < 0 || X >= Width) continue;
 						BYTE c = spr->bits[rowS + xx];
-						if (c != spr->trans) bits[rowD + X] = c;   // NO fog code  the fog pass greys it
+						if (c != spr->trans) bits[rowD + X] = c;   // fog pass greys this later
 					}
 				}
 			}

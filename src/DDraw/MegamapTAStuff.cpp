@@ -53,7 +53,7 @@ void MegamapTAStuff::Init (FullScreenMinimap * parent_p, RECT * MegaMapScreen_p,
 	int MaxIconWidth, int MaxIconHeight, BOOL UseSurfaceCursor_a)
 {
 
-	
+
 	parent= parent_p;
 	TAmainStruct_Ptr= *TAmainStruct_PtrPtr;
 	UseSurfaceCursor= UseSurfaceCursor_a;
@@ -65,28 +65,9 @@ void MegamapTAStuff::Init (FullScreenMinimap * parent_p, RECT * MegaMapScreen_p,
 	MegaMapWidth= MegaMapScreen.right- MegaMapScreen.left;
 	MegaMapHeight= MegaMapScreen.bottom- MegaMapScreen.top;
 
-
-
 	memcpy ( &TAMap, TAMap_p, sizeof(RECT));
 	TAMapWidth= TAMap.right- TAMap.left;
 	TAMapHeight= TAMap.bottom- TAMap.top;
-	// ===== TEMP WAYPOINT-SCALE probe - remove before commit =====
-	{
-		static bool wpLogged = false;
-		if (!wpLogged) {
-			int mmFW = (*TAmainStruct_PtrPtr)->FeatureMapSizeX;
-			int mmFH = (*TAmainStruct_PtrPtr)->FeatureMapSizeY;
-			FILE* fw = fopen("waypoint_scale.txt", "a");
-			if (fw) {
-				fprintf(fw, "TAMapWidth=%d TAMapHeight=%d | TAMap rect L=%d T=%d R=%d B=%d | MegaMapWidth=%d MegaMapHeight=%d | fw=%d fh=%d (fw-2)*16=%d (fh-8)*16=%d\n",
-					TAMapWidth, TAMapHeight, TAMap.left, TAMap.top, TAMap.right, TAMap.bottom,
-					MegaMapWidth, MegaMapHeight, mmFW, mmFH, (mmFW - 2) * 16, (mmFH - 8) * 16);
-				fclose(fw);
-			}
-			wpLogged = true;
-		}
-	}
-	// ===== END WAYPOINT-SCALE probe =====
 
 	Screen2MapWidthScale= static_cast<float>(MegaMapWidth)/ static_cast<float>(TAMapWidth);
 	Screen2MapHeightScale= static_cast<float>(MegaMapHeight)/ static_cast<float>(TAMapHeight);
