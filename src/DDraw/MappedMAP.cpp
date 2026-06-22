@@ -14,7 +14,7 @@
 
 #include <climits>
 #include <cstring>
-
+void __cdecl DumpMegamapBMP(LPBYTE bits, int W, int H);
 // ProTA: defined in UnitMinimap.cpp — bakes indestructible-feature markers
 // into the megamap terrain image before the fog pass.
 void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height);
@@ -113,7 +113,13 @@ BadEnd:
 	// and they layer under the unit blips.
 
 	DrawFeaturesIntoMappedBits(MappedBits, Width_m, Height_m);
-
+	
+	// ===== TEMP - dump once, remove before commit =====
+	{
+		static bool dumped = false;
+		if (!dumped) { DumpMegamapBMP(MappedBits, Width_m, Height_m); dumped = true; }
+	}
+	// ===== END TEMP =====
 	if (NOMAPPING==(NOMAPPING&((*TAmainStruct_PtrPtr)->LosType)))
 	{//
 

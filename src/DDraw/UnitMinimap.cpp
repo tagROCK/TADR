@@ -24,10 +24,6 @@ using namespace std;
 #include "TAConfig.h"
 #include "ExternQuickKey.h"
 
-// ProTA: flat downward nudge (px) for megamap mex sprites AND unit blips,
-// so both sit a little lower on the terrain. Keep both uses on this one
-// constant so the sprite and its blip stay aligned.
-static const int MEGAMAP_BLIP_YNUDGE = 6;
 
 #if USEMEGAMAP
 
@@ -1358,7 +1354,6 @@ void UnitsMinimap::DrawUnit ( LPBYTE PixelBits, POINT * Aspect, UnitStruct * uni
 	}
 	int PlayerID= unitPtr->Owner_PlayerPtr0->PlayerAryIndex;
 
-
 	int TAx= unitPtr->XPos- unitPtr->UnitType->FootX/ 2; 
 	int TAy= unitPtr->YPos- (unitPtr->ZPos)/ 2- unitPtr->UnitType->FootY/ 2;
 	
@@ -1389,9 +1384,8 @@ void UnitsMinimap::DrawUnit ( LPBYTE PixelBits, POINT * Aspect, UnitStruct * uni
 	DescRect.left= static_cast<int>(static_cast<float>(TAx)* (static_cast<float>(Width_m)/ static_cast<float>(parent->TAMAPTAPos.right)))- GafAspect.x/ 2;
 	DescRect.right= DescRect.left+ GafAspect.x;
 	
-	DescRect.top = static_cast<int>(static_cast<float>(TAy) * (static_cast<float>(Height_m) / static_cast<float>(parent->TAMAPTAPos.bottom))) - GafAspect.y / 2 + MEGAMAP_BLIP_YNUDGE;
+	DescRect.top = static_cast<int>(static_cast<float>(TAy) * (static_cast<float>(Height_m) / static_cast<float>(parent->TAMAPTAPos.bottom))) - GafAspect.y / 2;
 	DescRect.bottom = DescRect.top + GafAspect.y;
-	DescRect.bottom= DescRect.top+ GafAspect.y;
 
 	Aspect->x= (Aspect->x)/ 4* 4;// avoid draw out of the surface, this x== pitch
 	if ((DescRect.right<0)
@@ -1768,7 +1762,62 @@ static MexSprite* GetMexSprite(int defIndex, FeatureDefStruct* def, int targetPx
 	s->bits = dst; s->w = dw; s->h = dh; s->trans = trans; s->builtPx = targetPx;
 	return s;
 }
+// ===== TEMP megamap buffer dump (8-bit BMP) - remove before commit =====
+void __cdecl DumpMegamapBMP(LPBYTE bits, int W, int H)
+{
+	if (!bits || W <= 0 || H <= 0) return;
 
+	// grab the live TA palette (R,G,B,0 per entry) from the program struct
+	BYTE* palBase = NULL;
+	if (TAProgramStruct_PtrPtr && *TAProgramStruct_PtrPtr)
+		palBase = (BYTE*)(*TAProgramStruct_PtrPtr) + 0x214;
+
+	int rowPad = (4 - (W % 4)) % 4;          // BMP rows are 4-byte aligned
+	int imgSize = (W + rowPad) * H;
+	int palSize = 256 * 4;
+	int offBits = 54 + palSize;
+	int fileSize = offBits + imgSize;
+
+	FILE* f = fopen("megamap_dump.bmp", "wb");
+	if (!f) return;
+
+	// --- BITMAPFILEHEADER (14 bytes) ---
+	unsigned char fh[14] = { 0 };
+	fh[0] = 'B'; fh[1] = 'M';
+	*(int*)&fh[2] = fileSize;
+	*(int*)&fh[10] = offBits;
+	fwrite(fh, 1, 14, f);
+
+	// --- BITMAPINFOHEADER (40 bytes) ---
+	unsigned char ih[40] = { 0 };
+	*(int*)&ih[0] = 40;
+	*(int*)&ih[4] = W;
+	*(int*)&ih[8] = H;                 // positive = bottom-up; we'll write rows bottom-up
+	*(short*)&ih[12] = 1;
+	*(short*)&ih[14] = 8;              // 8 bpp
+	*(int*)&ih[32] = 256;             // colors used
+	fwrite(ih, 1, 40, f);
+
+	// --- palette (BGRA per entry) ---
+	for (int i = 0; i < 256; ++i) {
+		unsigned char bgra[4] = { 0,0,0,0 };
+		if (palBase) {
+			bgra[0] = palBase[i * 4 + 2]; // B
+			bgra[1] = palBase[i * 4 + 1]; // G
+			bgra[2] = palBase[i * 4 + 0]; // R
+		}
+		fwrite(bgra, 1, 4, f);
+	}
+
+	// --- pixels, bottom-up, row-padded ---
+	unsigned char pad[4] = { 0,0,0,0 };
+	for (int y = H - 1; y >= 0; --y) {
+		fwrite(bits + y * W, 1, W, f);
+		if (rowPad) fwrite(pad, 1, rowPad, f);
+	}
+	fclose(f);
+}
+// ===== END dump helper =====
 // ===================================================================
 // ProTA: draw placed indestructible features into the megamap TERRAIN
 // image (MappedBits), so they get fogged/greyed by the existing terrain
@@ -1804,8 +1853,8 @@ void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 	// world extent  match the OLD overlay's formula exactly so baked
 	// sprites land where the previous overlay drew them:
 	// TAMAPTAPos.right = (TNT Width-1)*16, .bottom = (TNT Height-4)*16.
-	int mapRight = (fw - 1) * 16;
-	int mapBottom = (fh - 4) * 16;
+	int mapRight = (fw - 2) * 16;   // true world width  (320 tiles * 16 on a 5120 map)
+	int mapBottom = (fh - 8) * 16;   // true world height
 	if (mapRight <= 0)  mapRight = fw * 16;   // guard tiny maps
 	if (mapBottom <= 0) mapBottom = fh * 16;
 
@@ -1813,12 +1862,6 @@ void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 	const int   SPIRE_COLOR = 211;  // spire dot (fallback only)
 	const int   OTHER_COLOR = 165;  // other indestructible (fallback only)
 	const float HEIGHT_Z = 0.5f; // iso-lift (same as the overlay used)
-	const int   SpireMin = 18;
-	const int   SpireMax = 50;
-	const int   SpireScaleDiv = 15;
-	const int   SpriteMin = 8;
-	const int   SpriteMax = 30;
-	const int   FeatureScaleDiv = 12;   // non-spire art-size divisor; SMALLER = bigger walls/mexes
 
 	for (int gy = 0; gy < fh; ++gy)
 		for (int gx = 0; gx < fw; ++gx)
@@ -1840,50 +1883,58 @@ void DrawFeaturesIntoMappedBits(LPBYTE bits, int Width, int Height)
 				: OTHER_COLOR;
 
 			// cell -> world -> image pixel (same formula as the old overlay)
-			int worldX = gx * 16 + 8 + 4;
-			int worldY = gy * 16 + 8 - (int)((float)cell->height * HEIGHT_Z) + 4;
-			int px = (int)((float)worldX * (float)Width / (float)mapRight) + 2;
-			int py = (int)((float)worldY * (float)Height / (float)mapBottom) + 2 + MEGAMAP_BLIP_YNUDGE;
+			// AF centering: each feature centres on its OWN footprint (footX/footZ),
+			// not a fixed offset. footprint at +0x94 (two shorts: X, Z).
+			short* fpXZ = (short*)((char*)&fdef[di] + 0x94);
+			int footX = fpXZ[0];
+			int footZ = fpXZ[1];
+			if (footX < 1) footX = 1;     // guard bad/zero footprints
+			if (footZ < 1) footZ = 1;
+			int worldX = gx * 16 + footX * 8;
+			int worldY = gy * 16 + footZ * 8 - (int)((float)cell->height * HEIGHT_Z);
 
-			// pxPerCell uses the SAME Width/mapRight ratio as the old overlay
-			float pxPerCell = 16.0f * (float)Width / (float)mapRight;
+			int px = (int)((float)worldX * (float)Width / (float)mapRight);
+			int py = (int)((float)worldY * (float)Height / (float)mapBottom);
 
-			int target;
-			if (isSpire) {
-				int frameH = 0;
+			// ----- unified sizing: one scale for ALL features (like the poster) -----
+			int artMaj = 0, frameH = 0, frameW = 0;
+			{
 				PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
 				if (sq && SeqValid(sq)) {
 					PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
-					if (f0) frameH = f0->Height;
+					if (f0) { frameW = f0->Width; frameH = f0->Height; }
 				}
-				if (frameH < 1) frameH = 160;
-				target = (int)(frameH * pxPerCell / (float)SpireScaleDiv + 0.5f);
-				if (target < SpireMin) target = SpireMin;
-				if (target > SpireMax) target = SpireMax;
 			}
-			else {
-				// Size by ART dimensions, not footprint  footprint doesn't
-				// track visual size (e.g. DryRuin06 foot 3 but art 149px;
-				// DryRuin19 foot 5 but art 30px). Use the major art dimension,
-				// scaled like spires.
-				int artMaj = 0;
-				PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
-				if (sq && SeqValid(sq)) {
-					PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
-					if (f0) artMaj = (f0->Width > f0->Height) ? f0->Width : f0->Height;
-				}
-				if (artMaj < 1) artMaj = 80;   // fallback if art unreadable
-				target = (int)(artMaj * pxPerCell / (float)FeatureScaleDiv + 0.5f);
-				if (target < SpriteMin) target = SpriteMin;
-				if (target > SpriteMax) target = SpriteMax;
-			}
+			artMaj = (frameW > frameH) ? frameW : frameH;
+			if (artMaj < 1) artMaj = 32;   // fallback if art unreadable
+
+			// One ruler: art pixels -> world -> megamap px, same scale as position.
+			float pxPerWorld = (float)Width / (float)mapRight;
+			const float ARTWORLD = 1.0f;   // art-pixel : world-unit ratio (CALIBRATE)
+			int target = (int)((float)artMaj * ARTWORLD * pxPerWorld + 0.5f);
+			if (target < 2) target = 2;     // sanity floor only (avoid zero-size)
 
 			MexSprite* spr = GetMexSprite(di, &fdef[di], target, fdef, ndef);
 
 			if (spr && spr->bits) {
-				int left = px - spr->w / 2;
-				int top = isSpire ? (py - spr->h + spr->h / 6 + 6)
-					: (py - spr->h / 2);
+				
+				// AF anchor: projected point is the feature CENTRE; the sprite's
+				// anchor is the GAF frame's xPosition/yPosition (in full-res art
+				// pixels), scaled to our downscaled sprite size.
+				int anchorX = spr->w / 2;
+				int anchorY = spr->h;
+				{
+					PGAFSequence sq = FeatureDefToSequence(&fdef[di], fdef, ndef);
+					if (sq && SeqValid(sq)) {
+						PGAFFrame f0 = sq->PtrFrameAry[0].PtrFrame;
+						if (f0 && f0->Height > 0) {
+							anchorY = (int)((float)f0->yPosition * (float)spr->h / (float)f0->Height + 0.5f);
+						}
+					}
+				}
+				int left = px - anchorX;
+				int top = py - anchorY;
+								
 				for (int yy = 0; yy < spr->h; ++yy) {
 					int Y = top + yy;
 					if (Y < 0 || Y >= Height) continue;
