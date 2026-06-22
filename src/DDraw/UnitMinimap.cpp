@@ -1381,10 +1381,14 @@ void UnitsMinimap::DrawUnit ( LPBYTE PixelBits, POINT * Aspect, UnitStruct * uni
 	//
 
 	UnitPicture( unitPtr, PlayerID, &GafPixelBits, &GafAspect);
-	DescRect.left= static_cast<int>(static_cast<float>(TAx)* (static_cast<float>(Width_m)/ static_cast<float>(parent->TAMAPTAPos.right)))- GafAspect.x/ 2;
+	int mmFW = (*TAmainStruct_PtrPtr)->FeatureMapSizeX;
+	int mmRight = (mmFW - 2) * 16; if (mmRight <= 0) mmRight = parent->TAMAPTAPos.right;
+	DescRect.left = static_cast<int>(static_cast<float>(TAx) * (static_cast<float>(Width_m) / static_cast<float>(mmRight))) - GafAspect.x / 2;
 	DescRect.right= DescRect.left+ GafAspect.x;
 	
-	DescRect.top = static_cast<int>(static_cast<float>(TAy) * (static_cast<float>(Height_m) / static_cast<float>(parent->TAMAPTAPos.bottom))) - GafAspect.y / 2;
+	int mmFH = (*TAmainStruct_PtrPtr)->FeatureMapSizeY;
+	int mmBottom = (mmFH - 8) * 16; if (mmBottom <= 0) mmBottom = parent->TAMAPTAPos.bottom;
+	DescRect.top = static_cast<int>(static_cast<float>(TAy) * (static_cast<float>(Height_m) / static_cast<float>(mmBottom))) - GafAspect.y / 2;
 	DescRect.bottom = DescRect.top + GafAspect.y;
 
 	Aspect->x= (Aspect->x)/ 4* 4;// avoid draw out of the surface, this x== pitch
